@@ -4,7 +4,7 @@
 
 CareWatch monitoriza de forma consentida a una persona dentro de su hogar. El MVP recibe telemetría directamente desde un ESP32, detecta anomalías y, sólo entonces, pide a una laptop-gateway una foto para reunir evidencia. Después puede hacer un check-in de voz y alertar a familiares mediante una aplicación.
 
-La IA no realiza diagnósticos médicos. Como último recurso puede invocar una herramienta de llamada controlada, pero ésta sólo permite un número explícitamente autorizado cuando no responden la persona ni los familiares alertados dentro del plazo configurado.
+La IA no realiza diagnósticos médicos. Puede solicitar escalamiento anticipado, pero una ejecución Step Functions Standard invoca la política de fallback al vencer el plazo aunque el modelo falle, no responda o no lo solicite.
 
 ## Flujos principales
 
@@ -14,9 +14,10 @@ ESP32 → IoT Core → IoT Rule → SQS → telemetryProcessor → DynamoDB
                                                        └→ EventBridge: AnomalyDetected
 
 Investigación de anomalía:
-EventBridge → captureEvidence → comando MQTT a laptop → S3 privado → visionProcessor → Bedrock
-                                                                  └→ agente / herramientas: rostro y check-in de voz
-Agente → alerta a familiar + check-in de voz → EscalationPolicy → Amazon Connect (sólo fallback autorizado)
+EventBridge → Step Functions Standard → captureEvidence → comando MQTT a laptop → S3 privado
+                                          ↑ callback                 ↓
+                              respuesta humana / evidenceCallback ← visionProcessor → Bedrock
+Step Functions → alerta a familia + check-in de voz → timeout → EscalationPolicy → Amazon Connect
 
 App familiar:
 Web o móvil → API Gateway → Lambda API → DynamoDB / URLs prefirmadas S3
@@ -68,6 +69,7 @@ carewatch/v1/devices/{deviceId}/telemetry
 carewatch/v1/devices/{deviceId}/status
 carewatch/v1/devices/{deviceId}/command-acks
 carewatch/v1/devices/{deviceId}/commands
+carewatch/v1/devices/{deviceId}/evidence
 ```
 
 Configuración:
@@ -101,7 +103,7 @@ Opcional después: Device Shadow para configuración deseada, como volumen o mod
 
 ## 3. IoT Rule
 
-Una IoT Rule escucha topics MQTT y envía eventos a otros servicios AWS.
+Se necesitan reglas IoT separadas para telemetría, `command-acks` y evidencia. La regla de telemetría no procesa respuestas del gateway.
 
 | Aspecto | Definición |
 | --- | --- |
@@ -120,7 +122,9 @@ FROM 'carewatch/v1/devices/+/telemetry'
 Configuración:
 
 - Usar versión SQL `2016-03-23`.
-- Acción principal: `sqs:SendMessage`.
+- Acción de telemetría: `sqs:SendMessage` a `telemetry-queue`.
+- Acción de `command-acks`: invocar `commandCallbackHandler`, que valida `caseId` y llama `SendTaskSuccess`/`SendTaskFailure` con el token asociado.
+- Acción de evidencia: invocar `evidenceCallbackHandler`, que valida la llave S3 y reanuda la ejecución correspondiente.
 - Acción de error para visibilidad de fallos.
 - Rol IAM dedicado, limitado a la cola de telemetría.
 - Evitar filtros wildcard excesivamente amplios.
@@ -196,8 +200,9 @@ No es un servicio independiente: vive dentro de `telemetryProcessor`.
 | --- | --- |
 | Temperatura alta sostenida | Alerta `warning`. |
 | CO₂ alto sostenido | Alerta `warning`. |
-| Sin telemetría durante 10 minutos | Alerta de dispositivo desconectado. |
-| Posible caída visual + falta de movimiento | Alerta `critical`. |
+| Sin movimiento durante `N` minutos en horario activo | Abre caso `POSSIBLE_FALL` / `critical`. |
+| Sin telemetría durante 10 minutos | Watchdog programado abre caso `DEVICE_OFFLINE`; no depende de que llegue otra lectura. |
+| Posible caída visual | Evidencia que sube severidad de un caso ya abierto; no es disparador circular. |
 | Riesgo alto y falta de ambas respuestas | Evaluar llamada de fallback con política independiente. |
 
 Ejemplo de alerta:
@@ -215,7 +220,7 @@ Ejemplo de alerta:
 }
 ```
 
-Las reglas deterministas son el mecanismo principal del MVP. Al crear una alerta relevante, `telemetryProcessor` crea un `AnomalyCase` y publica un evento `carewatch.anomaly.detected`. El análisis visual, facial y de voz aumenta contexto, pero ninguna evidencia aislada debe activar la llamada de fallback.
+Las reglas usan el `timestamp` del dispositivo, no el orden de llegada a SQS. Antes de crear un caso, `telemetryProcessor` intenta un `PutItem` condicional en `OpenCaseLocks` con clave `recipientId#anomalyType`; si ya existe un caso abierto, añade evidencia al existente. Sólo quien obtiene el candado crea `AnomalyCase` y publica `carewatch.anomaly.detected`.
 
 ---
 
@@ -234,13 +239,13 @@ Tablas:
 
 | Tabla | Llave | Contenido |
 | --- | --- | --- |
-| `CareRecipients` | `recipientId` | Perfil mínimo, consentimiento, zona horaria y contactos. |
-| `CareProfiles` | `recipientId` | Edad, condiciones, medicamentos y contexto ingresado manualmente. Las sugerencias del LLM se guardan como pendientes. |
+| `CareRecipients` | `recipientId` | Perfil mínimo, zona horaria y consentimientos granulares: `camera`, `voice` y `fallbackCall`. |
 | `Devices` | `deviceId` | Último contacto, estado, versión, configuración y `recipientId`. |
 | `Telemetry` | `deviceId` / `timestamp#eventId` | Historial de sensores. |
 | `Alerts` | `recipientId` / `createdAt#alertId` | Severidad, estado, evidencia y confirmación. |
-| `Observations` | `recipientId` / `capturedAt#imageId` | Resultado visual y llave S3. |
-| `AnomalyCases` | `caseId` | Estado del caso, evidencia, plazos, respuestas y resultado de escalamiento. |
+| `Observations` | `recipientId` / `capturedAt#imageId` | Resultado visual, `caseId` y llave S3. |
+| `AnomalyCases` | `caseId` | Estado, `executionArn`, evidencia, plazos, respuestas y resultado de escalamiento. |
+| `OpenCaseLocks` | `recipientId#anomalyType` | Candado de caso abierto, actualizado/liberado al resolver y protegido con TTL. |
 | `EventLog` | `caseId` / `timestamp#eventId` | Trazabilidad de decisiones, llamadas a herramientas y cambios de estado; sin foto, audio ni biometría cruda. |
 | `CaregiverAccess` | `userId` / `recipientId` | Relación de autorización uno-a-muchos, rol, prioridad y preferencias de alerta. |
 
@@ -251,8 +256,9 @@ Configuración:
   - Telemetría: 30–90 días.
   - Observaciones: según consentimiento y política de retención.
 - GSI opcionales:
-  - `AlertsByStatus`.
+  - `AlertsByAlertId` y `ObservationsByObservationId`, o incluir `recipientId` en las rutas de API.
   - `DevicesByRecipient`.
+  - `CaregiversByRecipient` para notificar a los familiares de un paciente.
 - Habilitar recuperación point-in-time fuera del hackathon.
 - Guardar referencias de S3, no fotos ni audio.
 
@@ -277,7 +283,7 @@ Configuración:
 - Prefijo de entrada:
 
 ```text
-raw-images/{recipientId}/{yyyy}/{mm}/{dd}/{imageId}.jpg
+raw-images/{recipientId}/{caseId}/{imageId}.jpg
 ```
 
 - Lifecycle:
@@ -294,7 +300,7 @@ raw-images/{recipientId}/{yyyy}/{mm}/{dd}/{imageId}.jpg
 | --- | --- |
 | Propósito | Analizar una foto recién subida y guardar una observación estructurada. |
 | Entrada | Evento `ObjectCreated` de S3, filtrado por `raw-images/` y `.jpg`. |
-| Salida | Bedrock, DynamoDB y el caso de anomalía. |
+| Salida | Bedrock, DynamoDB y callback a la ejecución Step Functions del `caseId`. |
 | Necesidad | Indispensable sólo para monitoreo visual. |
 
 Configuración inicial:
@@ -302,7 +308,7 @@ Configuración inicial:
 - Memoria: 1024 MB.
 - Timeout: 30 segundos.
 - Concurrencia reservada: 2.
-- Descargar foto de forma temporal, sin conservar copias.
+- Descargar foto de forma temporal, sin conservar copias; pasar a Bedrock sólo la evidencia necesaria.
 - Validar estrictamente el JSON devuelto por el modelo.
 
 Salida esperada:
@@ -326,9 +332,9 @@ Bedrock permite usar modelos generativos sin operar infraestructura de modelos.
 
 | Aspecto | Definición |
 | --- | --- |
-| Propósito | Convertir una foto en una observación limitada y estructurada; razonar sobre evidencia de un caso con herramientas controladas. |
+| Propósito | Convertir una foto en una observación limitada y estructurada para el orquestador. |
 | Entrada | Imagen JPEG, telemetría resumida, estado del caso y prompt de sistema. |
-| Salida | JSON de observación o solicitud estructurada de una herramienta permitida. |
+| Salida | JSON de observación; un timeout/error se normaliza como `uncertain`. |
 | Necesidad | Opcional para sensores; indispensable para análisis visual. |
 
 Configuración recomendada:
@@ -396,11 +402,13 @@ Configuración:
 - App client SPA/móvil sin client secret.
 - OAuth Authorization Code + PKCE.
 - MFA opcional para hackathon; recomendable en producción.
-- Grupos: `caregiver` y `admin`.
+- Grupos: `caregiver`, `recipient` y `admin`. Un usuario `recipient` sólo puede consultar/modificar sus propios consentimientos.
 - Access token: 60 minutos.
 - Refresh token: 7–30 días.
 
 Cognito autentica al usuario. La API debe consultar `CaregiverAccess` para autorizar el acceso a cada persona monitoreada.
+
+El endpoint `PUT /recipients/{recipientId}/consents` permite revocar `camera`, `voice` o `fallbackCall`. La API autoriza al propio `recipient` o a un `admin` explícitamente autorizado, registra el cambio en `EventLog` y hace que ejecuciones futuras (o antes de cada acción sensible) consulten el valor vigente.
 
 ---
 
@@ -420,9 +428,13 @@ GET  /me/recipients
 GET  /recipients/{recipientId}/dashboard
 GET  /recipients/{recipientId}/telemetry
 GET  /recipients/{recipientId}/alerts
-POST /alerts/{alertId}/acknowledge
-POST /images/upload-url
-GET  /observations/{observationId}/image-url
+GET  /recipients/{recipientId}/cases
+GET  /recipients/{recipientId}/cases/{caseId}
+POST /recipients/{recipientId}/cases/{caseId}/responses
+POST /recipients/{recipientId}/alerts/{alertId}/acknowledge
+GET  /recipients/{recipientId}/observations/{observationId}/image-url
+GET  /recipients/{recipientId}/consents
+PUT  /recipients/{recipientId}/consents
 ```
 
 Configuración:
@@ -431,7 +443,7 @@ Configuración:
 - JWT authorizer con issuer del User Pool y audience del App Client.
 - CORS limitado al dominio de la app.
 - No configurar logs de acceso centralizados en este MVP; `EventLog` conserva la auditoría funcional de acciones de usuario y casos.
-- No subir imágenes mediante API Gateway: entregar URL prefirmada S3.
+- La URL de carga no es una ruta de la app: `captureEvidence` crea una URL PUT prefirmada y la envía junto con `caseId`, llave S3 y vencimiento en el comando MQTT. El gateway no necesita Cognito.
 - Validar en Lambda que cada `recipientId` pertenece al usuario autenticado.
 
 ---
@@ -452,68 +464,74 @@ Configuración:
 - Concurrencia reservada: 5.
 - Validación de request.
 - Consultar `CaregiverAccess` usando el `sub` JWT.
-- URLs prefirmadas S3 con expiración de 5 minutos.
+- URLs prefirmadas de lectura para la app con expiración de 5 minutos. Las de escritura las firma `captureEvidence` y están ligadas a un `caseId`.
 - No devolver identificadores internos o datos de otras personas.
 
 ---
 
-## 15. EventBridge, agente de decisiones y escalamiento controlado
+## 15. Step Functions Standard: orquestación durable del caso
 
-Esta capa convierte una anomalía en un caso investigable. Sustituye por completo la captura periódica: una foto existe sólo si se abrió un caso.
+Esta capa convierte una anomalía en una ejecución durable por `caseId`. EventBridge sólo inicia el flujo; **Step Functions Standard** guarda el progreso, aplica esperas y timeout, y es el responsable de que exista un escalamiento aunque Bedrock no responda. No se incluye foto periódica.
 
-### EventBridge y `captureEvidence`
+### Inicio y estados
 
 | Aspecto | Definición |
 | --- | --- |
-| Propósito | Coordinar los pasos asíncronos de un caso y pedir evidencia bajo demanda. |
-| Entrada | Evento `carewatch.anomaly.detected` emitido por `telemetryProcessor`. |
-| Salida | `captureEvidence`, agente de decisiones y eventos de auditoría. |
-| Necesidad | Recomendable; indispensable en este diseño basado en casos. |
+| Propósito | Ejecutar un caso de punta a punta y mantener sus plazos. |
+| Entrada | `carewatch.anomaly.detected` desde EventBridge. |
+| Salida | Comandos de evidencia, alertas, callbacks y `EmergencyDialer`. |
+| Necesidad | Indispensable. Usar tipo `STANDARD`, no Express. |
 
 Estados mínimos del caso:
 
 ```text
-DETECTED → GATHERING_EVIDENCE → WAITING_FOR_RESPONSES → RESOLVED
-                                  └→ ESCALATION_REQUESTED → ESCALATED
+DETECTED → CHECK_CONSENT → GATHERING_EVIDENCE → ANALYZING
+         → WAITING_FOR_RESPONSES → RESOLVED / HUMAN_REVIEW
+                                  └→ TIMED_OUT → ESCALATION_POLICY → ESCALATED
 ```
 
-`captureEvidence` obtiene una URL prefirmada, publica este comando sólo al `Thing` gateway correspondiente y espera el `command-ack`:
+La ejecución usa callbacks `waitForTaskToken`. `captureEvidence` obtiene una URL prefirmada, guarda de forma cifrada la correlación del token y publica este comando sólo al `Thing` gateway correspondiente:
 
 ```json
 {
   "caseId": "case-uuid",
   "command": "CAPTURE_IMAGE",
   "reason": "ANOMALY_INVESTIGATION",
+  "s3Key": "raw-images/recipient-123/case-uuid/image-uuid.jpg",
+  "uploadUrl": "https://...",
   "expiresAt": "2026-09-23T18:35:00Z"
 }
 ```
 
 Configuración:
 
-- Regla por patrón `source: carewatch`, `detail-type: anomaly.detected`; no publicar un evento por cada lectura cruda.
-- DLQ y reintentos para `captureEvidence` y cada consumidor.
-- `caseId` obligatorio en comandos, observaciones, alertas y acciones para correlación e idempotencia.
-- Si el gateway no confirma o no hay foto dentro del plazo, registrar evidencia incompleta; no asumir que equivale a una emergencia.
+- Regla EventBridge precisa: `source: carewatch`, `detail-type: anomaly.detected`; target: `StartExecution` con nombre `caseId`.
+- `RequestPhoto`: callback máximo de 60 s. `commandCallbackHandler` y `evidenceCallbackHandler` validan los mensajes IoT y devuelven `SendTaskSuccess`/`SendTaskFailure`.
+- Si no hay ack/foto, guardar `evidenceIncomplete=true` y continuar a alerta/check-in; nunca interpretarlo como `safe`.
+- `WaitForResponse`: callbacks de persona/familia con `TimeoutSeconds = x`. La primera respuesta válida reanuda el flujo; el timeout pasa obligatoriamente a `EscalationPolicy`.
+- Configurar `Retry` para errores transitorios y `Catch` para convertir fallas de modelo/foto en incertidumbre. No poner foto, audio, token ni perfil médico en el estado de la ejecución.
+
+### Watchdog de ausencia de telemetría
+
+EventBridge Scheduler ejecuta `deviceWatchdog` cada minuto. Esta Lambda consulta `Devices.lastSeenAt`; si supera el umbral, adquiere el mismo candado `OpenCaseLocks` y crea `DEVICE_OFFLINE`. Este Scheduler no toma fotos ni sustituye el flujo de Step Functions.
 
 ### Agente de decisiones y herramientas
 
-Bedrock recibe un resumen acotado de telemetría, la observación visual, el estado de consentimientos y el historial inmediato del caso. No recibe acceso libre a tablas ni permisos de infraestructura. Un despachador valida cada solicitud contra un esquema y ejecuta sólo estas herramientas:
+Bedrock se invoca después de que exista evidencia o ésta haya expirado. Recibe un resumen acotado de telemetría, observación visual y estado del caso. No recibe acceso libre a tablas ni permisos de infraestructura. Su salida puede elevar severidad o pedir más evidencia, pero no cerrar un caso ni impedir que el timeout escale. Un despachador valida cada solicitud contra un esquema y ejecuta sólo estas herramientas del MVP:
 
 | Herramienta | Propósito | Límite importante |
 | --- | --- | --- |
 | `get_case_context` | Leer evidencia mínima y perfil permitido. | No expone todo el expediente ni datos de otros usuarios. |
 | `request_fresh_photo` | Pedir otra foto ligada al mismo caso. | Frecuencia y vencimiento limitados. |
-| `verify_enrolled_face` | Comparar el rostro con el enrolamiento consentido. | Resultado: `MATCH`, `NO_MATCH`, `NO_FACE`, `MULTIPLE_FACES` o `UNCERTAIN`; no identifica desconocidos. |
 | `request_voice_checkin` | Pedir una respuesta hablada breve mediante laptop. | Sólo audio intencional y acotado; Transcribe produce texto. |
 | `notify_caregiver` | Crear alerta para app/SNS. | Incluye `caseId`, severidad y plazo de respuesta. |
-| `create_profile_suggestion` | Proponer contexto para revisión humana. | Nunca modifica automáticamente enfermedades o medicamentos. |
-| `emergency_call` | Activar el último recurso para un caso. | Sólo acepta `caseId`; `EscalationPolicy` aplica todas las validaciones antes de marcar. |
+| `emergency_call` | Solicitar escalamiento anticipado. | Puede acelerar la evaluación, pero el timeout también invoca la política de forma independiente. |
 
-El reconocimiento facial es verificación 1:1 de la persona previamente enrolada y con consentimiento explícito; no es vigilancia ni búsqueda de identidades. Para voz, el MVP usa transcripción de comandos/check-in: no trata una voz como identidad biométrica entre sesiones.
+El reconocimiento facial y las sugerencias de perfil quedan fuera del MVP: elevan el costo de privacidad y no son necesarios para demostrar el flujo principal. Para voz, el MVP usa transcripción de un check-in intencional; no trata una voz como identidad biométrica entre sesiones. El audio se sube con URL prefirmada a `raw-audio/{recipientId}/{caseId}/`, se transcribe y se borra conforme a la misma retención corta.
 
 ### Check-in, alertas y llamada de fallback
 
-Si el agente considera la evidencia relevante, puede solicitar simultáneamente un check-in de voz y una alerta a todos los familiares activos del paciente. La persona puede responder desde el gateway; cualquier familiar autorizado puede responder desde la aplicación. Las preferencias permiten alertar a todos en paralelo para el demo o usar prioridad/secuencia. Una respuesta válida cancela o lleva a revisión el caso según la política.
+La máquina inicia simultáneamente un check-in de voz y una alerta a todos los familiares activos del paciente. La persona puede responder desde el gateway; cualquier familiar autorizado puede responder desde la aplicación. Las preferencias permiten alertar a todos en paralelo para el demo o usar prioridad/secuencia. Una respuesta válida es un check-in explícito que responde a la pregunta esperada, o una acción firmada de familiar `SAFE`, `CONTACTING` o `ESCALATE`. Sólo una respuesta humana puede resolver o llevar a revisión el caso.
 
 Al vencer el plazo `x`, `EscalationPolicy` evalúa de forma determinista:
 
@@ -523,7 +541,7 @@ Al vencer el plazo `x`, `EscalationPolicy` evalúa de forma determinista:
 4. El número de destino está en una lista permitida y corresponde al contacto de demo configurado, nunca a 911.
 5. No existe ya una llamada para ese `caseId` (idempotencia).
 
-Si el agente invoca `emergency_call` y se aprueban esas condiciones, `EmergencyDialer` inicia Amazon Connect con un flujo de contacto que reproduce un aviso de prueba y llama al número autorizado. El resultado de la llamada se escribe en `EventLog` y `AnomalyCases`. El modelo no recibe credenciales ni permiso IAM directo para Connect: la herramienta controlada es su única vía.
+Si el agente invoca `emergency_call`, puede adelantar la entrada a la política; si no lo hace, el timeout llega a la misma política. Al aprobar las condiciones, `EmergencyDialer` inicia Amazon Connect con un flujo de contacto que reproduce un aviso de prueba y llama al número autorizado. El resultado se escribe en `EventLog` y `AnomalyCases`. El modelo no recibe credenciales ni permiso IAM directo para Connect.
 
 ---
 
@@ -551,18 +569,22 @@ IAM define permisos. KMS controla llaves de cifrado.
 | Rol | Permiso mínimo |
 | --- | --- |
 | IoT Rule | `sqs:SendMessage` sólo a telemetría. |
-| telemetryProcessor | Consumir SQS, escribir DynamoDB, publicar SNS. |
-| visionProcessor | Leer prefijo S3, invocar Bedrock y escribir observaciones/alertas. |
+| telemetryProcessor | Consumir SQS, escritura condicional DynamoDB y `events:PutEvents` sólo al bus CareWatch. |
+| deviceWatchdog | Leer `Devices`, adquirir `OpenCaseLocks`, crear caso y publicar evento. |
+| Step Functions | Invocar Lambdas del flujo, publicar SNS y llamar sólo a `EscalationPolicy`; sin permisos abiertos de S3/Connect. |
+| commandCallbackHandler / evidenceCallbackHandler | Leer correlación mínima y `states:SendTaskSuccess`/`states:SendTaskFailure` sólo para la máquina CareWatch. |
+| visionProcessor | Leer prefijo S3 del caso, invocar Bedrock y escribir observaciones. |
+| voiceCheckinHandler | Firmar audio, iniciar Transcribe y devolver resultado al `caseId`. |
 | apiHandler | Acceder sólo a tablas necesarias y firmar URLs S3. |
 | captureEvidence | Firmar la subida necesaria y publicar sólo `CAPTURE_IMAGE` al topic del gateway indicado. |
-| decisionAgent | Invocar Bedrock y el despachador de herramientas; no puede invocar Connect. |
-| escalationPolicy | Leer el caso, consentimientos y respuestas; sólo puede solicitar `EmergencyDialer`. |
+| decisionAgent | Invocar Bedrock y el despachador de herramientas; no puede invocar Connect ni resolver un caso. |
+| escalationPolicy | Leer caso, consentimientos y respuestas; sólo puede solicitar `EmergencyDialer`. |
 | emergencyDialer | `connect:StartOutboundVoiceContact` para la instancia, flujo y destinos permitidos. |
 
 Reglas:
 
 - No usar `AdministratorAccess`.
-- No usar `s3:*`, `bedrock:*` ni permisos amplios.
+- No usar `s3:*`, `bedrock:*` ni permisos amplios. La restricción de contenido `command=CAPTURE_IMAGE` se valida en aplicación; IAM sólo puede restringir topic/ARN.
 - No guardar claves estáticas en código.
 - Cifrado AWS administrado para MVP; CMK de KMS si producción, cumplimiento o auditoría lo requieren.
 
@@ -570,13 +592,12 @@ Reglas:
 
 ## Implementación por fases
 
-1. IoT Core, IoT Rule, SQS, telemetryProcessor y DynamoDB.
-2. Simulador de gateway.
-3. Cognito, API Gateway y dashboard web.
-4. Alertas SNS y confirmación.
-5. EventBridge, `AnomalyCases`, captura S3 bajo demanda, `visionProcessor` y Bedrock.
-6. Check-in de voz, alertas con vencimiento y verificación facial consentida.
-7. `EscalationPolicy` y Amazon Connect con un único número de demo permitido y aviso de prueba.
+1. IoT Core, IoT Rules para telemetría/acks/evidencia, SQS, DynamoDB y candado `OpenCaseLocks`.
+2. Step Functions Standard, callbacks y el flujo simulado completo: anomalía → timeout → `EscalationPolicy` → llamada demo.
+3. EventBridge Scheduler + `deviceWatchdog` y alarma mínima DLQ → SNS.
+4. Simuladores de ESP32/gateway que responden comandos y callbacks.
+5. Cognito, API Gateway y dashboard de casos/respuestas/consentimientos.
+6. Captura S3 bajo demanda, `visionProcessor`, Bedrock y check-in de voz.
 
 ## Camino mínimo funcional
 

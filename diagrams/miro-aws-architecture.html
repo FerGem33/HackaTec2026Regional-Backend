@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1600, height=900">
+  <meta name="screen:name" content="Arquitectura AWS — CareWatch">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; width: 1600px; height: 900px; overflow: hidden; background: #fff; color: #16191f; font-family: Arial, Helvetica, sans-serif; }
+    .header { height: 108px; padding: 36px 54px 0; border-bottom: 1px solid #e8edf3; }
+    h1 { margin: 0; font-size: 30px; letter-spacing: -.4px; }
+    .subtitle { margin-top: 8px; font-size: 15px; color: #5f6b7a; }
+    .canvas { position: relative; height: 792px; padding: 30px 54px; }
+    .zone { position: absolute; top: 30px; height: 620px; border: 2px solid #d7e0ea; border-radius: 18px; background: #fbfcfe; }
+    .zone h2 { margin: 18px 24px; font-size: 18px; color: #253858; }
+    .home { left: 54px; width: 242px; }
+    .aws { left: 320px; width: 970px; border-color: #ff9900; background: #fffaf5; }
+    .family { left: 1314px; width: 232px; }
+    .row-label { position: absolute; left: 26px; color: #5f6b7a; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; }
+    .telemetry { top: 75px; } .vision { top: 294px; } .app { top: 510px; }
+    .service { position: absolute; width: 148px; min-height: 112px; padding: 15px 10px 10px; border: 1px solid #c7d4e2; border-radius: 12px; background: #fff; text-align: center; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .icon { width: 34px; height: 34px; margin: 0 auto 8px; border-radius: 8px; background: #ff9900; color: white; font-weight: 700; font-size: 12px; display:flex; align-items:center; justify-content:center; }
+    .name { font-size: 15px; line-height: 18px; font-weight: 700; }
+    .detail { margin-top: 5px; font-size: 11px; line-height: 14px; color: #5f6b7a; }
+    .sensor { left: 42px; top: 95px; width: 158px; }
+    .gateway { left: 42px; top: 338px; width: 158px; }
+    .iot { left: 60px; top: 92px; } .sqs { left: 258px; top: 92px; } .ingest { left: 456px; top: 92px; } .ddb { left: 670px; top: 92px; }
+    .s3 { left: 60px; top: 312px; } .visionlambda { left: 258px; top: 312px; } .bedrock { left: 456px; top: 312px; } .sns { left: 670px; top: 312px; }
+    .api { left: 258px; top: 530px; } .cognito { left: 456px; top: 530px; }
+    .client { left: 36px; top: 260px; width: 160px; }
+    svg { position:absolute; inset: 0; width: 1600px; height: 792px; pointer-events:none; }
+    .flow { fill:none; stroke:#4d6178; stroke-width:2.5; marker-end:url(#arrow); }
+    .dashed { fill:none; stroke:#6b5cff; stroke-width:2.5; stroke-dasharray:7 5; marker-end:url(#purple); }
+    .flowlabel { font-size:12px; fill:#35475c; font-weight:700; }
+    .footer { position:absolute; left:54px; bottom:28px; width:1492px; height:72px; display:flex; align-items:center; gap:24px; padding:0 24px; border-radius:12px; background:#f4f7fa; color:#405164; font-size:12px; }
+    .legend-line { width:45px; border-top:3px solid #4d6178; } .legend-dash { width:45px; border-top:3px dashed #6b5cff; }
+    .warning { margin-left:auto; text-align:right; color:#5f6b7a; max-width:590px; }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <h1>CareWatch — Arquitectura AWS del MVP</h1>
+    <div class="subtitle">Monitoreo consentido · telemetría IoT, análisis visual asistido y alertas para familiares</div>
+  </header>
+  <main class="canvas">
+    <section class="zone home"><h2>Hogar</h2>
+      <div class="service sensor"><div class="icon">IoT</div><div class="name">ESP32 + sensores</div><div class="detail">temperatura · humedad · CO₂<br>proximidad · movimiento</div></div>
+      <div class="service gateway"><div class="icon">GW</div><div class="name">Gateway laptop</div><div class="detail">cámara · audio · bocina<br>captura sólo por anomalía</div></div>
+    </section>
+    <section class="zone aws"><h2>AWS Cloud</h2>
+      <div class="row-label telemetry">Telemetría</div><div class="row-label vision">Fotos y análisis</div><div class="row-label app">App y observabilidad</div>
+      <div class="service iot"><div class="icon">IoT</div><div class="name">AWS IoT Core</div><div class="detail">MQTT TLS · certificados X.509</div></div>
+      <div class="service sqs"><div class="icon">SQS</div><div class="name">Amazon SQS</div><div class="detail">cola de telemetría</div></div>
+      <div class="service ingest"><div class="icon">λ</div><div class="name">AWS Lambda</div><div class="detail">ingesta + motor de reglas</div></div>
+      <div class="service ddb"><div class="icon">DB</div><div class="name">DynamoDB</div><div class="detail">estado e historial</div></div>
+      <div class="service s3"><div class="icon">S3</div><div class="name">Amazon S3</div><div class="detail">fotos privadas · retención</div></div>
+      <div class="service visionlambda"><div class="icon">λ</div><div class="name">AWS Lambda</div><div class="detail">orquesta análisis visual</div></div>
+      <div class="service bedrock"><div class="icon">AI</div><div class="name">Amazon Bedrock</div><div class="detail">agente + evidencia</div></div>
+      <div class="service sns"><div class="icon">SNS</div><div class="name">Amazon SNS</div><div class="detail">push / email / SMS opcional</div></div>
+      <div class="service api"><div class="icon">API</div><div class="name">API Gateway</div><div class="detail">API REST</div></div>
+      <div class="service cognito"><div class="icon">ID</div><div class="name">Amazon Cognito</div><div class="detail">identidad y roles</div></div>
+    </section>
+    <section class="zone family"><h2>Familiar</h2>
+      <div class="service client"><div class="icon">APP</div><div class="name">App web / móvil</div><div class="detail">estado · historial · alertas<br>confirmación de escalación</div></div>
+    </section>
+    <svg viewBox="0 0 1600 792" aria-hidden="true">
+      <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="#4d6178"/></marker><marker id="purple" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="#6b5cff"/></marker></defs>
+      <path class="flow" d="M254 237 C290 237 315 253 380 253"/><text class="flowlabel" x="270" y="228">MQTT TLS</text>
+      <path class="flow" d="M528 253 L578 253"/><path class="flow" d="M726 253 L776 253"/><path class="flow" d="M924 253 L990 253"/>
+      <text class="flowlabel" x="537" y="239">IoT Rule</text>
+      <path class="flow" d="M254 455 C290 455 315 473 380 473"/><text class="flowlabel" x="267" y="472">URL prefirmada</text>
+      <path class="flow" d="M528 473 L578 473"/><path class="flow" d="M726 473 L776 473"/><path class="flow" d="M924 473 C1002 473 1020 478 1050 478"/>
+      <text class="flowlabel" x="536" y="458">ObjectCreated</text>
+      <path class="flow" d="M1140 310 C1195 310 1185 467 1124 467"/><text class="flowlabel" x="1160" y="395">alerta</text>
+      <path class="flow" d="M1135 473 C1250 473 1260 388 1350 388"/><text class="flowlabel" x="1234" y="434">push / email</text>
+      <path class="flow" d="M1350 416 C1230 416 1160 645 924 645"/><text class="flowlabel" x="1120" y="625">HTTPS + JWT</text>
+      <path class="dashed" d="M776 645 L726 645"/><text class="flowlabel" x="732" y="632">autoriza</text>
+    </svg>
+    <footer class="footer"><span class="legend-line"></span><span>flujo de datos / control</span><span class="legend-dash"></span><span>autorización u observabilidad</span><span class="warning">La foto sólo se toma tras una anomalía; una política independiente decide cualquier llamada de fallback.</span></footer>
+  </main>
+</body>
+</html>

@@ -25,14 +25,13 @@ El fallback consiste en una llamada al número de demo previamente autorizado �
 
 1. El ESP32 publica telemetría de temperatura, humedad, CO₂, proximidad y/o movimiento mediante MQTT seguro.
 2. AWS procesa las lecturas y aplica reglas de anomalía interpretables.
-3. Ante una anomalía se crea un `AnomalyCase` y se solicita al gateway una foto bajo demanda.
-4. Un agente basado en Amazon Bedrock analiza evidencia estructurada y puede usar herramientas controladas para:
+3. Un candado de DynamoDB evita casos duplicados y una ejecución de Step Functions Standard coordina cada `AnomalyCase`, sus callbacks y plazos.
+4. La ejecución solicita al gateway una foto bajo demanda y, después, un agente basado en Amazon Bedrock analiza la evidencia estructurada. Puede:
    - Solicitar otra foto.
-   - Verificar el rostro de la persona previamente enrolada y consentida.
    - Pedir un check-in de voz y transcribir la respuesta.
    - Alertar a los familiares autorizados.
-   - Activar `emergency_call` como último recurso.
-5. Si no hay respuesta válida de la persona ni de los familiares alertados antes de un plazo configurable, la política de escalamiento puede permitir una llamada al número demo autorizado.
+   - Solicitar escalamiento anticipado, sin poder cerrar un caso ni evitar el timeout.
+5. Si no hay respuesta humana válida de la persona ni de los familiares alertados antes de un plazo configurable, Step Functions invoca `EscalationPolicy`, que puede permitir una llamada al número demo autorizado.
 
 ## Arquitectura
 
@@ -47,25 +46,25 @@ Servicios principales:
 | AWS IoT Core | Conectividad MQTT con certificados X.509. |
 | SQS + Lambda | Ingesta resiliente de telemetría y detección de anomalías. |
 | DynamoDB | Estado, historial, perfiles, casos y eventos funcionales. |
-| EventBridge | Coordinación asíncrona del caso de anomalía. |
+| EventBridge + Step Functions Standard | Inicio y orquestación durable de cada caso, con callbacks y plazos. |
 | S3 | Evidencia visual privada con retención corta. |
 | Amazon Bedrock | Análisis de evidencia y agente de decisiones con herramientas restringidas. |
-| Rekognition / Transcribe | Verificación facial consentida y check-in de voz. |
+| Transcribe | Check-in de voz intencional. |
 | SNS | Notificaciones para familiares. |
 | Cognito + API Gateway | Identidad y API de la aplicación familiar. |
 | Amazon Connect | Llamada de fallback al contacto demo autorizado. |
 
-CloudWatch no forma parte del alcance del MVP actual. La trazabilidad funcional se conserva en `EventLog`.
+La trazabilidad funcional se conserva en `EventLog`. Se mantiene una alarma mínima de DLQ → SNS para detectar fallos de entrega críticos.
 
 ## Seguridad y privacidad
 
 - El monitoreo requiere consentimiento explícito y revocable.
-- Cámara, biometría y llamada de fallback requieren consentimientos independientes.
+- Cámara, voz y llamada de fallback requieren consentimientos independientes, modificables desde la aplicación.
 - No se graba audio continuo; sólo respuestas de voz intencionales para un check-in.
 - No se toman fotos periódicas: la captura está ligada a un `caseId` de anomalía.
 - Las imágenes se guardan privadas en S3 y se eliminan conforme a una política de retención corta.
 - Un paciente puede tener varios familiares autorizados; las alertas se pueden enviar en paralelo o por prioridad.
-- El agente no recibe credenciales de telefonía. La herramienta `emergency_call` siempre pasa por `EscalationPolicy`.
+- El agente no recibe credenciales de telefonía. `EscalationPolicy` es invocada por el timeout aunque el agente falle o no solicite escalamiento.
 
 Antes de una llamada, la política exige como mínimo: riesgo alto, falta de respuesta de persona y familiares alertados, consentimiento vigente, número en lista permitida e idempotencia por `caseId`.
 
@@ -76,7 +75,7 @@ Incluido:
 - Telemetría IoT y reglas de anomalía.
 - Dashboard para familiares, alertas y confirmación de casos.
 - Captura de foto bajo demanda y análisis asistido.
-- Check-in de voz y verificación facial como evidencia.
+- Check-in de voz como evidencia.
 - Llamada de demostración a un número autorizado.
 
 Fuera de alcance:
@@ -84,13 +83,13 @@ Fuera de alcance:
 - Diagnósticos médicos.
 - Llamadas reales al 911 o a servicios públicos de emergencia.
 - Audio o video continuo.
-- Identificación biométrica de personas no enroladas.
-- Observabilidad operativa avanzada.
+- Reconocimiento facial e identificación biométrica.
+- Observabilidad operativa avanzada, excepto alarma de DLQ → SNS.
 
 ## Documentación
 
-- [Resumen de arquitectura](ARCHITECTURE.md)
-- [Especificación técnica detallada](ARCHITECTURE_DETAILED.md)
+- [Resumen de arquitectura](docs/ARCHITECTURE.md)
+- [Especificación técnica detallada](docs/ARCHITECTURE_DETAILED.md)
 - [Diagrama AWS](diagrams/aws-architecture-mvp.svg)
 
 ## Estado
