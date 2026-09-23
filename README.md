@@ -2,7 +2,7 @@
 
 Sistema ubicuo para monitorear y apoyar el cuidado consentido de una persona en su hogar. Proyecto para la categoría **Smart Software** de HackatecNM 2026.
 
-CareWatch reúne señales ambientales y de presencia desde un ESP32, detecta anomalías y activa una investigación puntual: puede solicitar una foto a una laptop-gateway, analizar la evidencia con IA, pedir un check-in de voz y alertar a los familiares autorizados.
+CareWatch usa una Raspberry Pi 4B como gateway del hogar: recibe señales auxiliares de un ESP32 y ejecuta localmente el primer detector de anomalías visuales. Una anomalía activa una investigación puntual: la Pi puede enviar una foto a AWS para análisis multimodal, pedir un check-in de voz y alertar a los familiares autorizados.
 
 No pretende diagnosticar enfermedades ni sustituir atención médica.
 
@@ -15,18 +15,18 @@ Una persona que requiere acompañamiento puede vivir sola o pasar periodos sin s
 El sistema evita capturas periódicas de cámara y audio. Sólo cuando una anomalía relevante abre un caso, reúne evidencia adicional y coordina una respuesta.
 
 ```text
-Sensores → anomalía → evidencia puntual → IA + herramientas
-         → check-in de voz + alerta familiar → resolución o fallback telefónico
+ESP32 → Raspberry Pi + visión local → anomalía → evidencia puntual a AWS
+                                      → IA + herramientas → check-in / alerta → fallback
 ```
 
 El fallback consiste en una llamada al número de demo previamente autorizado —nunca al 911 durante el hackathon— y sólo como último recurso.
 
 ## Flujo del MVP
 
-1. El ESP32 publica telemetría de temperatura, humedad, CO₂, proximidad y/o movimiento mediante MQTT seguro.
-2. AWS procesa las lecturas y aplica reglas de anomalía interpretables.
-3. Un candado de DynamoDB evita casos duplicados y una ejecución de Step Functions Standard coordina cada `AnomalyCase`, sus callbacks y plazos.
-4. La ejecución solicita al gateway una foto bajo demanda y, después, un agente basado en Amazon Bedrock analiza la evidencia estructurada. Puede:
+1. El ESP32 entrega telemetría auxiliar a la Raspberry Pi por Wi-Fi local o serial.
+2. La Pi ejecuta continuamente un modelo ligero de visión. Sólo publica un evento cuando detecta una anomalía visual; no envía video continuo a la nube.
+3. AWS crea/reutiliza un `AnomalyCase` y Step Functions Standard coordina callbacks y plazos.
+4. Tras comprobar consentimiento de cámara, la Pi sube únicamente el frame puntual asociado al evento. Amazon Bedrock analiza la imagen, sensores y contexto. Puede:
    - Solicitar otra foto.
    - Pedir un check-in de voz y transcribir la respuesta.
    - Alertar a los familiares autorizados.
@@ -41,9 +41,9 @@ Servicios principales:
 
 | Componente | Propósito |
 | --- | --- |
-| ESP32 | Lectura y publicación de sensores. |
-| Laptop-gateway | Cámara, micrófono, bocina y ejecución de comandos bajo demanda. |
-| AWS IoT Core | Conectividad MQTT con certificados X.509. |
+| ESP32 | Lectura de sensores auxiliares hacia la Raspberry Pi. |
+| Raspberry Pi 4B | Gateway, cámara/audio/bocina y primer detector visual local. |
+| AWS IoT Core | Conectividad MQTT de la Raspberry Pi con certificado X.509. |
 | SQS + Lambda | Ingesta resiliente de telemetría y detección de anomalías. |
 | DynamoDB | Estado, historial, perfiles, casos y eventos funcionales. |
 | EventBridge + Step Functions Standard | Inicio y orquestación durable de cada caso, con callbacks y plazos. |
@@ -52,7 +52,7 @@ Servicios principales:
 | Transcribe | Check-in de voz intencional. |
 | SNS | Notificaciones para familiares. |
 | Cognito + API Gateway | Identidad y API de la aplicación familiar. |
-| Amazon Connect | Llamada de fallback al contacto demo autorizado. |
+| Amazon Connect Customer (Voice) | Llamada de fallback al contacto demo autorizado. |
 
 La trazabilidad funcional se conserva en `EventLog`. Se mantiene una alarma mínima de DLQ → SNS para detectar fallos de entrega críticos.
 
@@ -61,7 +61,7 @@ La trazabilidad funcional se conserva en `EventLog`. Se mantiene una alarma mín
 - El monitoreo requiere consentimiento explícito y revocable.
 - Cámara, voz y llamada de fallback requieren consentimientos independientes, modificables desde la aplicación.
 - No se graba audio continuo; sólo respuestas de voz intencionales para un check-in.
-- No se toman fotos periódicas: la captura está ligada a un `caseId` de anomalía.
+- No se transmiten videos continuos: la imagen está ligada a un `caseId` de anomalía y requiere consentimiento de cámara vigente.
 - Las imágenes se guardan privadas en S3 y se eliminan conforme a una política de retención corta.
 - Un paciente puede tener varios familiares autorizados; las alertas se pueden enviar en paralelo o por prioridad.
 - El agente no recibe credenciales de telefonía. `EscalationPolicy` es invocada por el timeout aunque el agente falle o no solicite escalamiento.
@@ -74,7 +74,7 @@ Incluido:
 
 - Telemetría IoT y reglas de anomalía.
 - Dashboard para familiares, alertas y confirmación de casos.
-- Captura de foto bajo demanda y análisis asistido.
+- Detección visual local continua; foto puntual y análisis asistido sólo ante anomalía.
 - Check-in de voz como evidencia.
 - Llamada de demostración a un número autorizado.
 
@@ -91,6 +91,7 @@ Fuera de alcance:
 - [Resumen de arquitectura](docs/ARCHITECTURE.md)
 - [Especificación técnica detallada](docs/ARCHITECTURE_DETAILED.md)
 - [Diagrama AWS](diagrams/aws-architecture-mvp.svg)
+- [Cotización AWS reproducible](docs/AWS_COST_ESTIMATE.md)
 
 ## Estado
 

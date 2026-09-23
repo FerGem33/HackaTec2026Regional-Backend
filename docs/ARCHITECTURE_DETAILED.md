@@ -2,22 +2,23 @@
 
 ## Alcance
 
-CareWatch monitoriza de forma consentida a una persona dentro de su hogar. El MVP recibe telemetría directamente desde un ESP32, detecta anomalías y, sólo entonces, pide a una laptop-gateway una foto para reunir evidencia. Después puede hacer un check-in de voz y alertar a familiares mediante una aplicación.
+CareWatch monitoriza de forma consentida a una persona dentro de su hogar. El ESP32 entrega telemetría auxiliar a una Raspberry Pi 4B local. La Pi ejecuta el primer detector visual de anomalías, integra cámara/audio/sensores y es el único gateway hacia AWS. Sólo después de una anomalía y de comprobar consentimiento se sube una foto puntual para análisis multimodal en AWS.
 
 La IA no realiza diagnósticos médicos. Puede solicitar escalamiento anticipado, pero una ejecución Step Functions Standard invoca la política de fallback al vencer el plazo aunque el modelo falle, no responda o no lo solicite.
 
 ## Flujos principales
 
 ```text
-Telemetría:
-ESP32 → IoT Core → IoT Rule → SQS → telemetryProcessor → DynamoDB
-                                                       └→ EventBridge: AnomalyDetected
+Telemetría y detección inicial:
+ESP32 → Raspberry Pi (enlace local) → modelo de visión local + contexto de sensores
+                                      └→ IoT Core → IoT Rule → SQS → telemetryProcessor → DynamoDB
+                                                                  └→ EventBridge: AnomalyDetected
 
 Investigación de anomalía:
-EventBridge → Step Functions Standard → captureEvidence → comando MQTT a laptop → S3 privado
+EventBridge → Step Functions Standard → CheckConsent → comando MQTT a Raspberry Pi → S3 privado
                                           ↑ callback                 ↓
                               respuesta humana / evidenceCallback ← visionProcessor → Bedrock
-Step Functions → alerta a familia + check-in de voz → timeout → EscalationPolicy → Amazon Connect
+Step Functions → alerta a familia + check-in de voz → timeout → EscalationPolicy → Amazon Connect Customer (Voice)
 
 App familiar:
 Web o móvil → API Gateway → Lambda API → DynamoDB / URLs prefirmadas S3
@@ -29,24 +30,25 @@ Mantener todos los recursos en una misma región AWS reduce latencia, complejida
 
 ---
 
-## 1. Gateway: laptop
+## 1. Gateway: Raspberry Pi 4B
 
 No es un servicio AWS: es el intermediario local entre hardware, cámara y nube.
 
 | Aspecto | Definición |
 | --- | --- |
-| Propósito | Tomar evidencia visual bajo demanda, reproducir preguntas y recibir respuesta de voz. |
-| Entrada | Comandos desde IoT Core; cámara, micrófono y bocina locales. |
-| Salida | Fotos a S3 mediante URL prefirmada, audio de check-in limitado y confirmaciones de comandos. |
-| Necesidad | Indispensable en el prototipo porque la cámara es la laptop. |
-| Sustitución futura | Raspberry Pi o gateway dedicado. |
+| Propósito | Recibir sensores ESP32, ejecutar visión local continua, retener sólo el frame de anomalía en memoria, reproducir preguntas y recibir respuesta de voz. |
+| Entrada | ESP32 por Wi-Fi local/HTTP/MQTT local/serial; cámara, micrófono, bocina y comandos desde IoT Core. |
+| Salida | Telemetría consolidada, evento visual de anomalía, foto puntual S3 mediante URL prefirmada, audio de check-in y `command-acks`. |
+| Necesidad | Indispensable: es el gateway y primer detector del MVP. |
+| Sustitución futura | Hardware edge con más cómputo/acelerador para ejecutar también el análisis multimodal localmente. |
 
 Configuración recomendada:
 
-- Servicio local en Python o Node.js.
+- Servicio local en Python o Node.js; procesos separados para adquisición ESP32, cámara/visión y MQTT.
+- Modelo ligero de visión cuantizado; medir FPS, latencia y temperatura en la Pi real. La detección local abre una anomalía; no se envía video continuo.
 - Buffer local ante pérdida de internet.
-- Fotos JPEG de 1280×720, idealmente menores a 1 MB.
-- Sin credenciales AWS estáticas: certificado X.509 para IoT y URLs prefirmadas para S3.
+- Mantener un buffer circular exclusivamente en RAM de los últimos frames; borrar el frame una vez enviado o descartado. Fotos JPEG de 1280×720, idealmente menores a 1 MB.
+- Sin credenciales AWS estáticas: certificado X.509 de la Pi para IoT y URLs prefirmadas para S3. El ESP32 no recibe credenciales AWS.
 - Indicador visible cuando cámara o micrófono estén activos.
 
 ---
@@ -57,15 +59,16 @@ AWS IoT Core es el punto de entrada MQTT seguro para dispositivos conectados.
 
 | Aspecto | Definición |
 | --- | --- |
-| Propósito | Recibir telemetría del ESP32 y enviar comandos al ESP32 o gateway. |
-| Entrada | MQTT TLS desde ambos dispositivos, cada uno con certificado propio. |
-| Salida | IoT Rules y comandos MQTT al dispositivo adecuado. |
+| Propósito | Recibir telemetría y anomalías visuales desde la Pi, y enviarle comandos. |
+| Entrada | MQTT TLS desde la Raspberry Pi. |
+| Salida | IoT Rules y comandos MQTT al gateway. |
 | Necesidad | Indispensable para el diseño IoT propuesto. |
 
 Topics iniciales:
 
 ```text
 carewatch/v1/devices/{deviceId}/telemetry
+carewatch/v1/devices/{deviceId}/visual/anomaly
 carewatch/v1/devices/{deviceId}/status
 carewatch/v1/devices/{deviceId}/command-acks
 carewatch/v1/devices/{deviceId}/commands
@@ -74,8 +77,7 @@ carewatch/v1/devices/{deviceId}/evidence
 
 Configuración:
 
-- Crear un `Thing` y certificado por dispositivo físico: uno para ESP32 y otro para gateway.
-- Crear y asociar un certificado X.509 por dispositivo.
+- Crear un `Thing` y certificado X.509 por Raspberry Pi gateway. El ESP32 queda en red local.
 - MQTT sobre TLS en puerto `8883`.
 - QoS 1 para telemetría importante.
 - Cada mensaje debe llevar `eventId` UUID y `timestamp` UTC.
@@ -108,8 +110,8 @@ Se necesitan reglas IoT separadas para telemetría, `command-acks` y evidencia. 
 | Aspecto | Definición |
 | --- | --- |
 | Propósito | Separar la red de dispositivos del procesamiento de negocio. |
-| Entrada | `carewatch/v1/devices/+/telemetry`. |
-| Salida | Mensaje normalizado a SQS. |
+| Entrada | `carewatch/v1/devices/+/telemetry`, `+/visual/anomaly`, `+/command-acks` y `+/evidence`. |
+| Salida | SQS para telemetría/anomalías y Lambdas de callback para comandos/evidencia. |
 | Necesidad | Indispensable dentro de esta arquitectura. |
 
 Consulta inicial:
@@ -123,6 +125,7 @@ Configuración:
 
 - Usar versión SQL `2016-03-23`.
 - Acción de telemetría: `sqs:SendMessage` a `telemetry-queue`.
+- Acción de anomalía visual: `sqs:SendMessage` a `anomaly-queue` con `eventType`, `confidence`, `modelVersion`, métricas de postura/movimiento y contexto de sensores; nunca frames ni video en MQTT.
 - Acción de `command-acks`: invocar `commandCallbackHandler`, que valida `caseId` y llama `SendTaskSuccess`/`SendTaskFailure` con el token asociado.
 - Acción de evidencia: invocar `evidenceCallbackHandler`, que valida la llave S3 y reanuda la ejecución correspondiente.
 - Acción de error para visibilidad de fallos.
@@ -200,7 +203,8 @@ No es un servicio independiente: vive dentro de `telemetryProcessor`.
 | --- | --- |
 | Temperatura alta sostenida | Alerta `warning`. |
 | CO₂ alto sostenido | Alerta `warning`. |
-| Sin movimiento durante `N` minutos en horario activo | Abre caso `POSSIBLE_FALL` / `critical`. |
+| Raspberry Pi publica `visual/anomaly.detected` | Abre caso `POSSIBLE_FALL` / `critical` con evidencia local y sensores auxiliares. |
+| Sin movimiento durante `N` minutos en horario activo | Señal auxiliar para confirmar/elevar una anomalía visual. |
 | Sin telemetría durante 10 minutos | Watchdog programado abre caso `DEVICE_OFFLINE`; no depende de que llegue otra lectura. |
 | Posible caída visual | Evidencia que sube severidad de un caso ya abierto; no es disparador circular. |
 | Riesgo alto y falta de ambas respuestas | Evaluar llamada de fallback con política independiente. |
@@ -220,7 +224,7 @@ Ejemplo de alerta:
 }
 ```
 
-Las reglas usan el `timestamp` del dispositivo, no el orden de llegada a SQS. Antes de crear un caso, `telemetryProcessor` intenta un `PutItem` condicional en `OpenCaseLocks` con clave `recipientId#anomalyType`; si ya existe un caso abierto, añade evidencia al existente. Sólo quien obtiene el candado crea `AnomalyCase` y publica `carewatch.anomaly.detected`.
+Las reglas usan el `timestamp` de la Pi, no el orden de llegada a SQS. La detección visual local es el disparador principal; sensores ambientales/de presencia aportan evidencia contextual. Antes de crear un caso, `telemetryProcessor`/`anomalyProcessor` intenta un `PutItem` condicional en `OpenCaseLocks` con clave `recipientId#anomalyType`; si ya existe un caso abierto, añade evidencia al existente. Sólo quien obtiene el candado crea `AnomalyCase` y publica `carewatch.anomaly.detected`.
 
 ---
 
@@ -490,13 +494,13 @@ DETECTED → CHECK_CONSENT → GATHERING_EVIDENCE → ANALYZING
                                   └→ TIMED_OUT → ESCALATION_POLICY → ESCALATED
 ```
 
-La ejecución usa callbacks `waitForTaskToken`. `captureEvidence` obtiene una URL prefirmada, guarda de forma cifrada la correlación del token y publica este comando sólo al `Thing` gateway correspondiente:
+La Pi detectó localmente la anomalía y conserva el frame asociado sólo en memoria. Tras `CheckConsent`, la ejecución usa callbacks `waitForTaskToken`: `captureEvidence` obtiene una URL prefirmada, guarda de forma cifrada la correlación del token y publica este comando al `Thing` gateway correspondiente:
 
 ```json
 {
   "caseId": "case-uuid",
-  "command": "CAPTURE_IMAGE",
-  "reason": "ANOMALY_INVESTIGATION",
+  "command": "UPLOAD_EVIDENCE",
+  "reason": "LOCAL_VISUAL_ANOMALY",
   "s3Key": "raw-images/recipient-123/case-uuid/image-uuid.jpg",
   "uploadUrl": "https://...",
   "expiresAt": "2026-09-23T18:35:00Z"
@@ -506,7 +510,7 @@ La ejecución usa callbacks `waitForTaskToken`. `captureEvidence` obtiene una UR
 Configuración:
 
 - Regla EventBridge precisa: `source: carewatch`, `detail-type: anomaly.detected`; target: `StartExecution` con nombre `caseId`.
-- `RequestPhoto`: callback máximo de 60 s. `commandCallbackHandler` y `evidenceCallbackHandler` validan los mensajes IoT y devuelven `SendTaskSuccess`/`SendTaskFailure`.
+- `RequestEvidenceUpload`: callback máximo de 60 s. `commandCallbackHandler` y `evidenceCallbackHandler` validan los mensajes IoT y devuelven `SendTaskSuccess`/`SendTaskFailure`.
 - Si no hay ack/foto, guardar `evidenceIncomplete=true` y continuar a alerta/check-in; nunca interpretarlo como `safe`.
 - `WaitForResponse`: callbacks de persona/familia con `TimeoutSeconds = x`. La primera respuesta válida reanuda el flujo; el timeout pasa obligatoriamente a `EscalationPolicy`.
 - Configurar `Retry` para errores transitorios y `Catch` para convertir fallas de modelo/foto en incertidumbre. No poner foto, audio, token ni perfil médico en el estado de la ejecución.
@@ -522,8 +526,8 @@ Bedrock se invoca después de que exista evidencia o ésta haya expirado. Recibe
 | Herramienta | Propósito | Límite importante |
 | --- | --- | --- |
 | `get_case_context` | Leer evidencia mínima y perfil permitido. | No expone todo el expediente ni datos de otros usuarios. |
-| `request_fresh_photo` | Pedir otra foto ligada al mismo caso. | Frecuencia y vencimiento limitados. |
-| `request_voice_checkin` | Pedir una respuesta hablada breve mediante laptop. | Sólo audio intencional y acotado; Transcribe produce texto. |
+| `request_fresh_photo` | Pedir otra foto ligada al mismo caso. | La Pi toma un frame nuevo sólo tras consentimiento; frecuencia y vencimiento limitados. |
+| `request_voice_checkin` | Pedir una respuesta hablada breve mediante Pi. | Sólo audio intencional y acotado; Transcribe produce texto. |
 | `notify_caregiver` | Crear alerta para app/SNS. | Incluye `caseId`, severidad y plazo de respuesta. |
 | `emergency_call` | Solicitar escalamiento anticipado. | Puede acelerar la evaluación, pero el timeout también invoca la política de forma independiente. |
 
@@ -541,7 +545,7 @@ Al vencer el plazo `x`, `EscalationPolicy` evalúa de forma determinista:
 4. El número de destino está en una lista permitida y corresponde al contacto de demo configurado, nunca a 911.
 5. No existe ya una llamada para ese `caseId` (idempotencia).
 
-Si el agente invoca `emergency_call`, puede adelantar la entrada a la política; si no lo hace, el timeout llega a la misma política. Al aprobar las condiciones, `EmergencyDialer` inicia Amazon Connect con un flujo de contacto que reproduce un aviso de prueba y llama al número autorizado. El resultado se escribe en `EventLog` y `AnomalyCases`. El modelo no recibe credenciales ni permiso IAM directo para Connect.
+Si el agente invoca `emergency_call`, puede adelantar la entrada a la política; si no lo hace, el timeout llega a la misma política. Al aprobar las condiciones, `EmergencyDialer` inicia Amazon Connect Customer (Voice) con un flujo de contacto que reproduce un aviso de prueba y llama al número autorizado. El resultado se escribe en `EventLog` y `AnomalyCases`. El modelo no recibe credenciales ni permiso IAM directo para Connect.
 
 ---
 
@@ -576,7 +580,7 @@ IAM define permisos. KMS controla llaves de cifrado.
 | visionProcessor | Leer prefijo S3 del caso, invocar Bedrock y escribir observaciones. |
 | voiceCheckinHandler | Firmar audio, iniciar Transcribe y devolver resultado al `caseId`. |
 | apiHandler | Acceder sólo a tablas necesarias y firmar URLs S3. |
-| captureEvidence | Firmar la subida necesaria y publicar sólo `CAPTURE_IMAGE` al topic del gateway indicado. |
+| captureEvidence | Firmar la subida necesaria y publicar sólo `UPLOAD_EVIDENCE` al topic de la Pi indicada. |
 | decisionAgent | Invocar Bedrock y el despachador de herramientas; no puede invocar Connect ni resolver un caso. |
 | escalationPolicy | Leer caso, consentimientos y respuestas; sólo puede solicitar `EmergencyDialer`. |
 | emergencyDialer | `connect:StartOutboundVoiceContact` para la instancia, flujo y destinos permitidos. |
@@ -584,7 +588,7 @@ IAM define permisos. KMS controla llaves de cifrado.
 Reglas:
 
 - No usar `AdministratorAccess`.
-- No usar `s3:*`, `bedrock:*` ni permisos amplios. La restricción de contenido `command=CAPTURE_IMAGE` se valida en aplicación; IAM sólo puede restringir topic/ARN.
+- No usar `s3:*`, `bedrock:*` ni permisos amplios. La restricción de contenido `command=UPLOAD_EVIDENCE` se valida en aplicación; IAM sólo puede restringir topic/ARN.
 - No guardar claves estáticas en código.
 - Cifrado AWS administrado para MVP; CMK de KMS si producción, cumplimiento o auditoría lo requieren.
 
