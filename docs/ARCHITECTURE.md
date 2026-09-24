@@ -166,7 +166,7 @@ No almacenar audio continuo en el MVP. Si se habilita voz, guardar sólo comando
 | `Devices` | `deviceId` | Estado, último contacto, `recipientId`, versión, configuración. |
 | `Telemetry` | `deviceId` / `timestamp#eventId` | Lecturas normalizadas; TTL de 30–90 días para MVP. |
 | `Alerts` | `recipientId` / `createdAt#alertId` | Severidad, evidencia, estado, confirmación y auditoría. |
-| `Observations` | `recipientId` / `capturedAt#imageId` | Resultado visual, `caseId` y llave S3 con `caseId`. |
+| `Observations` | `caseId` / `imageId` | Resultado visual estructurado de Bedrock (Hito 4, tramo de analisis), `recipientId`, llave S3, modelo/configuracion. TTL de 7 dias (protege el resumen narrativo, ligado al mismo ciclo de vida que la foto en S3). |
 | `AnomalyCases` | `caseId` | Estado, evidencia, `executionArn`, task tokens cifrados, plazos y resultado. |
 | `OpenCaseLocks` | `recipientId#anomalyType` | Candado condicional con TTL para impedir casos duplicados. |
 | `EventLog` | `caseId` / `timestamp#eventId` | Trazabilidad de decisiones, herramientas, alertas y respuestas, sin material biométrico crudo. |

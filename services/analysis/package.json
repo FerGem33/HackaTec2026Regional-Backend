@@ -1,0 +1,19 @@
+{
+  "name": "@sensecare/analysis",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Analisis visual estructurado con Amazon Bedrock Converse tras evidenceStatus AVAILABLE (Hito 4, tramo de analisis).",
+  "dependencies": {
+    "@sensecare/contracts": "*",
+    "ajv": "^8.17.1",
+    "@aws-sdk/client-dynamodb": "^3.686.0",
+    "@aws-sdk/lib-dynamodb": "^3.686.0",
+    "@aws-sdk/client-s3": "^3.686.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.686.0"
+  },
+  "devDependencies": {
+    "aws-sdk-client-mock": "^4.1.0",
+    "@types/aws-lambda": "^8.10.145"
+  }
+}

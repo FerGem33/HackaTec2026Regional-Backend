@@ -12,6 +12,7 @@ export default defineConfig({
       "services/ingestion/test/setupEnv.ts",
       "services/orchestration/test/setupEnv.ts",
       "services/evidence/test/setupEnv.ts",
+      "services/analysis/test/setupEnv.ts",
     ],
   },
 });
