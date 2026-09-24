@@ -64,6 +64,24 @@ Después:
 5. Guardar certificados y claves de IoT en `/etc/SenseCare/iot/`, propiedad `root:SenseCare`, modo `0640` para certificados y `0640`/`0600` para la clave privada según el usuario del proceso. Nunca dejarlos en el directorio del proyecto.
 6. No instalar claves de acceso IAM, `aws configure` con credenciales estáticas ni roles de cuenta en la Pi. El único material cloud persistente es el certificado X.509 de AWS IoT.
 
+Quien administra AWS debe entregar por un canal privado `device.pem.crt`,
+`private.pem.key`, `AmazonRootCA1.pem` y el endpoint ATS. Instalar los tres
+archivos desde el directorio donde se recibieron:
+
+```bash
+sudo install -d -o root -g SenseCare -m 0750 /etc/SenseCare/iot
+sudo install -o root -g SenseCare -m 0640 device.pem.crt \
+  /etc/SenseCare/iot/device.pem.crt
+sudo install -o root -g SenseCare -m 0640 private.pem.key \
+  /etc/SenseCare/iot/private.pem.key
+sudo install -o root -g SenseCare -m 0644 AmazonRootCA1.pem \
+  /etc/SenseCare/iot/AmazonRootCA1.pem
+```
+
+El usuario/grupo del servicio puede tener otro nombre, pero el proceso edge no
+debe ejecutarse como `root`. El certificado privado nunca se guarda en Git,
+capturas de pantalla, mensajes públicos ni archivos de configuración.
+
 Antes de seguir, comprobar:
 
 ```bash
@@ -124,9 +142,9 @@ Crear `/etc/SenseCare/config.yaml` desde una plantilla sin secretos. Ejemplo:
 
 ```yaml
 deviceId: pi-demo-01
-recipientId: recipient-demo-01
 awsRegion: us-east-1
 iotEndpoint: "<account-specific-ats-endpoint>"
+clientId: pi-demo-01
 topics:
   telemetry: SenseCare/v1/devices/pi-demo-01/telemetry
   visualAnomaly: SenseCare/v1/devices/pi-demo-01/visual/anomaly
@@ -166,7 +184,22 @@ audio:
   outputDevice: "default"
 ```
 
-La configuración debe fallar al iniciar si `deviceId`, endpoints, rutas de certificado, topics o límites de evidencia faltan. El `recipientId` es una referencia operativa de demo, no un perfil médico.
+`ThingName`, `clientId` MQTT y `deviceId` deben ser exactamente el mismo valor.
+El administrador obtiene el valor de `iotEndpoint` con:
+
+```bash
+aws iot describe-endpoint \
+  --endpoint-type iot:Data-ATS \
+  --query endpointAddress \
+  --output text \
+  --region us-east-1 \
+  --profile default
+```
+
+La Pi sólo recibe el hostname resultante; no requiere ni debe contener el
+perfil, las credenciales ni la configuración AWS CLI del administrador. La
+configuración debe fallar al iniciar si `deviceId`, `clientId`, endpoint, rutas
+de certificado, topics o límites de evidencia faltan.
 
 ## 5. Integración ESP32 → Pi
 
@@ -195,7 +228,7 @@ Reglas del lector:
 - Validar tipos, rangos físicos y tamaño máximo antes de aceptar una línea.
 - Descartar JSON corrupto sin terminar el proceso; incrementar un contador `invalidSensorMessages`.
 - Si el ESP32 no tiene reloj confiable, marcar la lectura como `sourceTimestampUnavailable` y asignar `receivedAt` en Pi. No fingir una hora exacta.
-- La Pi agrega `deviceId`, `recipientId`, `gatewayVersion` y `receivedAt` UTC antes de publicar telemetría.
+- La Pi agrega `deviceId`, `firmwareVersion` y `occurredAt` UTC antes de publicar telemetría. No incluye `recipientId`: el backend lo resuelve desde `SenseCare-Devices`.
 - El motor `sensor_rules.py` puede emitir anomalías, pero nunca sube una imagen por sí mismo: el backend abre/reutiliza caso, valida consentimiento y ordena la evidencia. Una lectura aislada no es anomalía.
 
 Publicar telemetría consolidada cada 5 segundos en perfil `demo` y cada 30–60 segundos fuera de demo; nunca publicar un frame en este topic.
@@ -293,7 +326,6 @@ Topic: `SenseCare/v1/devices/{deviceId}/visual/anomaly`
   "eventId": "uuid",
   "eventType": "VISUAL_ANOMALY",
   "deviceId": "pi-demo-01",
-  "recipientId": "recipient-demo-01",
   "occurredAt": "2026-09-23T18:00:00Z",
   "anomalyType": "POSSIBLE_FALL",
   "confidence": 0.86,
@@ -319,7 +351,6 @@ Topic: `SenseCare/v1/devices/{deviceId}/sensor/anomaly`
   "eventId": "uuid",
   "eventType": "SENSOR_ANOMALY",
   "deviceId": "pi-demo-01",
-  "recipientId": "recipient-demo-01",
   "occurredAt": "2026-09-23T18:00:00Z",
   "anomalyType": "TEMPERATURE_ALERT",
   "severity": "warning",
@@ -433,6 +464,10 @@ Los logs deben ser estructurados y contener `eventId`, `caseId` cuando exista, n
 | Temperatura | Una ejecución de 20 min no alcanza throttling ni reinicios; registrar temperatura máxima. |
 
 Entregar al equipo backend: `deviceId`, endpoint IoT (sin secretos), versión de software/modelo, prueba de cada topic, esquema real de eventos, y cualquier diferencia respecto a este documento. Entregar certificados únicamente mediante un canal privado acordado con quien despliega AWS.
+
+El aprovisionamiento de Thing, certificado, política y la prueba de humo MQTT
+del lado administrador están en
+[DEVICE_PROVISIONING_AND_SMOKE_TEST.md](DEVICE_PROVISIONING_AND_SMOKE_TEST.md).
 
 ## 12. Checklist de integración con backend
 
