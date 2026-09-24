@@ -5,6 +5,9 @@ export default defineConfig({
     include: [
       "packages/*/test/**/*.test.ts",
       "simulators/*/test/**/*.test.ts",
+      "services/*/test/**/*.test.ts",
+      "infra/test/**/*.test.ts",
     ],
+    setupFiles: ["services/ingestion/test/setupEnv.ts"],
   },
 });

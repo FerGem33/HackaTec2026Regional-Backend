@@ -1,0 +1,17 @@
+{
+  "name": "@sensecare/ingestion",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Lambdas de ingesta (telemetria, anomalia visual, anomalia de sensor) para SenseCareDemoStack.",
+  "dependencies": {
+    "@sensecare/contracts": "*",
+    "@aws-sdk/client-dynamodb": "^3.686.0",
+    "@aws-sdk/lib-dynamodb": "^3.686.0",
+    "@aws-sdk/client-eventbridge": "^3.686.0"
+  },
+  "devDependencies": {
+    "aws-sdk-client-mock": "^4.1.0",
+    "@types/aws-lambda": "^8.10.145"
+  }
+}
