@@ -137,9 +137,9 @@ function synth(): Template {
 }
 
 describe("CaseOrchestration with pushNotifications", () => {
-  it("creates exactly 10 Lambdas (the 9 existing ones -- 8 tasks + CaseDispatcherFn -- plus DispatchPushFn)", () => {
+  it("creates exactly 15 Lambdas (the 10 push-era Lambdas plus 5 escalation Lambdas)", () => {
     const template = synth();
-    template.resourceCountIs("AWS::Lambda::Function", 10);
+    template.resourceCountIs("AWS::Lambda::Function", 15);
     template.hasResourceProperties("AWS::Lambda::Function", { FunctionName: "SenseCare-dispatchPush" });
   });
 
