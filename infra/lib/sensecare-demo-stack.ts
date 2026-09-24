@@ -34,25 +34,17 @@ export interface SenseCareDemoStackProps extends cdk.StackProps {
 
 /**
  * Hito 2 (infraestructura base e ingesta) + Hito 4 completo (EventBridge ->
-<<<<<<< HEAD
  * Step Functions Standard por caseId, seguido del transporte seguro de
  * evidencia puntual: consentimiento, UPLOAD_EVIDENCE con URL prefirmada,
- * callbacks MQTT y reconciliacion final) + Hito 5 parcial (Cognito + API
- * Gateway HTTP para el endpoint de ingesta del simulador web, ver
- * DemoIngestApi; las rutas de consulta/cancelacion/escalamiento de
- * familiares siguen pendientes). Sin Bedrock, SNS, Connect, frontend ni
- * check-in de voz/audio todavia (ver docs/IMPLEMENTATION_ROADMAP.md). No
+ * callbacks MQTT y reconciliacion final, y analisis visual estructurado con
+ * Amazon Bedrock Converse tras evidenceStatus AVAILABLE) + Hito 5 parcial
+ * (Cognito + API Gateway HTTP para ingesta del simulador web, emparejamiento
+ * por QR y consulta de solo lectura, ver DemoIngestApi; las rutas de
+ * consulta/cancelacion/escalamiento de familiares siguen pendientes). Sin
+ * SNS, Connect, frontend, check-in de voz/audio, Bedrock Agents ni
+ * herramientas autonomas todavia (ver docs/IMPLEMENTATION_ROADMAP.md). No
  * instancia Thing ni certificado X.509 (aprovisionamiento por dispositivo,
  * fuera de CDK a proposito: ver runbook de pre-despliegue).
-=======
- * Step Functions Standard por caseId, transporte seguro de evidencia
- * puntual, y analisis visual estructurado con Amazon Bedrock Converse tras
- * evidenceStatus AVAILABLE). Sin SNS, Connect, Cognito, API Gateway,
- * frontend, check-in de voz/audio, Bedrock Agents ni herramientas
- * autonomas todavia (ver docs/IMPLEMENTATION_ROADMAP.md). No instancia
- * Thing ni certificado X.509 (aprovisionamiento por dispositivo, fuera de
- * CDK a proposito: ver runbook de pre-despliegue).
->>>>>>> 8cd4fc813a8a54a25def2a31d65b252f4c3bbced
  */
 export class SenseCareDemoStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: SenseCareDemoStackProps) {
