@@ -6,3 +6,7 @@ process.env.EVENT_BUS_NAME ??= "SenseCare-test";
 process.env.OPEN_CASE_LOCK_TTL_SECONDS ??= "7200";
 process.env.PUBLISH_LEASE_SECONDS ??= "10";
 process.env.TELEMETRY_RETENTION_DAYS ??= "60";
+process.env.DEMO_TELEMETRY_QUEUE_URL ??= "https://sqs.us-east-1.amazonaws.com/123456789012/SenseCare-telemetry-test";
+process.env.DEMO_SENSOR_ANOMALY_QUEUE_URL ??=
+  "https://sqs.us-east-1.amazonaws.com/123456789012/SenseCare-sensor-anomaly-test";
+process.env.DEMO_DEVICE_ALLOWLIST ??= "sim-room-01";
