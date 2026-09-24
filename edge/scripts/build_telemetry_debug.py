@@ -60,8 +60,10 @@ def main() -> None:
                 payload["co2Ppm"] = reading.co2Ppm
             if reading.proximityCm is not None:
                 payload["proximityCm"] = reading.proximityCm
-            if reading.motion is not None:
-                payload["motion"] = reading.motion
+            if reading.dbAvg is not None:
+                payload["dbAvg"] = reading.dbAvg
+            if reading.dbPeak is not None:
+                payload["dbPeak"] = reading.dbPeak
 
             try:
                 schemas.validate_telemetry(payload)

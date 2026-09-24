@@ -23,8 +23,8 @@ def _reading(co2=800.0, temp=25.0):
         proximityCm=100.0,
         motion=False,
         luxLevel=100.0,
-        soundDbAvg=40.0,
-        soundDbPeak=50.0,
+        dbAvg=40.0,
+        dbPeak=50.0,
         raw={},
     )
 

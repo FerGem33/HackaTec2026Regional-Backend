@@ -11,15 +11,19 @@ Campos que SI mapean al contrato SenseCare (packages/contracts/schemas/telemetry
   hum       -> humidityPct
   co2       -> co2Ppm
   dist_mm   -> proximityCm (dist_mm / 10)
-  presencia -> motion
+  db_prom   -> dbAvg
+  db_pico   -> dbPeak
 
-Campos que el ESP32 produce pero el contrato actual NO admite
-(additionalProperties: false en el schema): lux, db_prom, db_pico.
-Se conservan en la lectura normalizada para logging/reglas locales, pero
-`main.py` los descarta antes de publicar telemetria. Si el equipo decide que
-luz y sonido son importantes para el demo, hay que extender
-telemetry.schema.json (agregar luxLevel/soundDbAvg/soundDbPeak como
-propiedades opcionales) antes de incluirlos en el payload MQTT.
+`motion` ya NO es parte del contrato (se quito en el milestone 3): aunque el
+ESP32 sigue mandando `presencia`, ese valor se conserva aqui por si sirve
+para reglas locales futuras, pero `main.py` ya no lo incluye en el payload
+de telemetria.
+
+`lux` sigue sin existir en el contrato (additionalProperties: false en el
+schema). Se conserva en la lectura normalizada para logging/reglas locales,
+pero `main.py` lo descarta antes de publicar. Si el equipo decide que la luz
+es util para el demo, hay que extender telemetry.schema.json (agregar
+luxLevel como propiedad opcional) antes de incluirla en el payload MQTT.
 """
 
 from __future__ import annotations
@@ -49,8 +53,8 @@ class SensorReading:
     proximityCm: Optional[float]
     motion: Optional[bool]
     luxLevel: Optional[float]
-    soundDbAvg: Optional[float]
-    soundDbPeak: Optional[float]
+    dbAvg: Optional[float]
+    dbPeak: Optional[float]
     raw: dict = field(repr=False)
 
 
@@ -84,8 +88,8 @@ def _parse_line(line: str) -> Optional[SensorReading]:
         proximityCm=proximity_cm,
         motion=bool(data.get("presencia")) if "presencia" in data else None,
         luxLevel=_to_float(data.get("lux")),
-        soundDbAvg=_to_float(data.get("db_prom")),
-        soundDbPeak=_to_float(data.get("db_pico")),
+        dbAvg=_to_float(data.get("db_prom")),
+        dbPeak=_to_float(data.get("db_pico")),
         raw=data,
     )
 
@@ -97,6 +101,8 @@ _RANGE_CHECKS = {
     "humidityPct": (0, 100),
     "co2Ppm": (0, 10000),
     "proximityCm": (0, 800),
+    "dbAvg": (0, 140),
+    "dbPeak": (0, 140),
 }
 
 

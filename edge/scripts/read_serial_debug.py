@@ -40,8 +40,8 @@ def main() -> None:
             print(
                 f"temp={reading.temperatureC} hum={reading.humidityPct} "
                 f"co2={reading.co2Ppm} proximityCm={reading.proximityCm} "
-                f"motion={reading.motion} lux={reading.luxLevel} "
-                f"dbAvg={reading.soundDbAvg} dbPeak={reading.soundDbPeak} "
+                f"lux={reading.luxLevel} "
+                f"dbAvg={reading.dbAvg} dbPeak={reading.dbPeak} "
                 f"(mensajes invalidos: {reader.invalid_message_count})"
             )
     except KeyboardInterrupt:

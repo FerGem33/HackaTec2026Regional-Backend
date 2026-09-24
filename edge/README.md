@@ -39,15 +39,16 @@ compilarse con `OUTPUT_JSON = 1` para que cada línea sea un objeto JSON.
 | `hum` | `humidityPct` | directo |
 | `co2` | `co2Ppm` | directo |
 | `dist_mm` | `proximityCm` | se divide entre 10 en `esp32_reader.py` |
-| `presencia` | `motion` | booleano directo |
-| `lux` | *(no existe en el contrato)* | se descarta antes de publicar; ver más abajo |
-| `db_prom`, `db_pico` | *(no existen en el contrato)* | se descartan antes de publicar |
+| `db_prom` | `dbAvg` | directo |
+| `db_pico` | `dbPeak` | directo |
+| `presencia` | *(ya no existe en el contrato)* | se lee y se conserva localmente por si sirve para reglas futuras, pero ya no se publica (`motion` se quitó del schema en el milestone 3) |
+| `lux` | *(no existe en el contrato)* | se descarta antes de publicar |
 
 El schema tiene `additionalProperties: false`, así que **no se puede** mandar
-`lux` o `db_prom` tal cual: AWS Lambda rechazaría el mensaje. `esp32_reader.py`
-sí guarda esos valores en la lectura normalizada (por si quieres usarlos en
-reglas locales o logging), pero `main.py` los quita antes de armar el payload
-MQTT.
+`lux` tal cual ni el viejo `motion`: AWS Lambda rechazaría el mensaje.
+`esp32_reader.py` sí guarda `lux`/`presencia` en la lectura normalizada (por
+si quieres usarlos en reglas locales o logging), pero `main.py` los quita
+antes de armar el payload MQTT.
 
 Si el equipo decide que luz y sonido son útiles para el demo (por ejemplo,
 para justificar una anomalía combinada), la vía correcta es extender el

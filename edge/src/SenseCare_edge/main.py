@@ -29,9 +29,10 @@ def _build_telemetry(config, reading) -> dict:
         "occurredAt": _now_iso(),
         "firmwareVersion": config.firmware_version,
     }
-    # Solo se incluyen los campos que el contrato admite hoy. lux/soundDb* se
-    # quedan en la lectura normalizada (ver esp32_reader.py) por si el equipo
-    # decide extender telemetry.schema.json mas adelante.
+    # Solo se incluyen los campos que el contrato admite hoy. `motion` ya no
+    # es parte del contrato (milestone 3); `lux` se queda en la lectura
+    # normalizada (ver esp32_reader.py) por si el equipo decide extender
+    # telemetry.schema.json mas adelante.
     if reading.temperatureC is not None:
         payload["temperatureC"] = reading.temperatureC
     if reading.humidityPct is not None:
@@ -40,8 +41,10 @@ def _build_telemetry(config, reading) -> dict:
         payload["co2Ppm"] = reading.co2Ppm
     if reading.proximityCm is not None:
         payload["proximityCm"] = reading.proximityCm
-    if reading.motion is not None:
-        payload["motion"] = reading.motion
+    if reading.dbAvg is not None:
+        payload["dbAvg"] = reading.dbAvg
+    if reading.dbPeak is not None:
+        payload["dbPeak"] = reading.dbPeak
     return payload
 
 
