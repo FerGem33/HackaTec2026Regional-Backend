@@ -10,6 +10,7 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as kms from "aws-cdk-lib/aws-kms";
 import { Construct } from "constructs";
 import * as path from "node:path";
 
@@ -37,6 +38,30 @@ export interface CaseOrchestrationProps {
     alertDeliveriesTable: dynamodb.ITable;
     pinpointApplicationId: string;
   };
+  // --- Hito de escalamiento ---
+  caseActionCallbacksTable: dynamodb.ITable;
+  // CMK, nombre y ARN del parametro SSM SecureString del numero de fallback
+  // de demo (ver fallback-call-secret.ts); el VALOR del parametro nunca
+  // pasa por CDK, solo su nombre/ARN para conceder IAM exacto y para que
+  // emergencyDialerFn.ts sepa que parametro leer.
+  fallbackCallCmk: kms.IKey;
+  fallbackCallDestinationParameterName: string;
+  fallbackCallDestinationParameterArn: string;
+  // Sin default para ninguno de los 3: instancia/flow/numero de origen de
+  // Connect se reclaman a mano (ver docs/EMERGENCY_CALL_RUNBOOK.md), nunca
+  // un literal en codigo.
+  connectInstanceId: string;
+  connectContactFlowId: string;
+  connectSourcePhoneNumber: string;
+  // Allowlist propia de escalamiento (deviceId de demo), nunca el numero
+  // real de destino.
+  escalationAllowedDeviceIds: string[];
+  // Gate global explicito del operador: por defecto false/ausente, lo que
+  // bloquea SIEMPRE el camino automatico con
+  // NO_ACTIVE_HUMAN_NOTIFICATION_CHANNEL (sin correos/push/WhatsApp
+  // confirmados todavia, ver docs/ALERTS_AND_CASE_ACTIONS_RUNBOOK.md).
+  humanNotificationChannelConfirmed?: boolean;
+  humanDecisionWaitSeconds?: number;
   // Sin default: el operador debe verificar disponibilidad/acceso real del
   // modelo (aws bedrock list-foundation-models/list-inference-profiles,
   // solo lectura) antes de desplegar. bedrockModelId es el valor que se
@@ -70,6 +95,7 @@ const ORCHESTRATION_ENTRY_ROOT = path.resolve(
 );
 const EVIDENCE_ENTRY_ROOT = path.resolve(__dirname, "..", "..", "..", "services", "evidence", "src");
 const ANALYSIS_ENTRY_ROOT = path.resolve(__dirname, "..", "..", "..", "services", "analysis", "src");
+const ESCALATION_ENTRY_ROOT = path.resolve(__dirname, "..", "..", "..", "services", "escalation", "src");
 
 /**
  * Hito 4 completo: EventBridge -> Step Functions Standard por caseId,
@@ -316,6 +342,109 @@ export class CaseOrchestration extends Construct {
     props.observationsTable.grant(recordAnalysisOutcomeFn, "dynamodb:PutItem");
     props.eventLogTable.grant(recordAnalysisOutcomeFn, "dynamodb:PutItem");
 
+    // --- Task Lambdas: decision humana + escalamiento (hito de escalamiento) ---
+
+    const requestHumanDecisionFn = new lambdaNodejs.NodejsFunction(this, "RequestHumanDecisionFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-requestHumanDecision",
+      entry: path.join(ORCHESTRATION_ENTRY_ROOT, "requestHumanDecisionFn.ts"),
+      environment: {
+        ANOMALY_CASES_TABLE_NAME: props.anomalyCasesTable.tableName,
+        CASE_ACTION_CALLBACKS_TABLE_NAME: props.caseActionCallbacksTable.tableName,
+      },
+    });
+    props.anomalyCasesTable.grant(requestHumanDecisionFn, "dynamodb:GetItem");
+    props.caseActionCallbacksTable.grant(requestHumanDecisionFn, "dynamodb:PutItem", "dynamodb:UpdateItem");
+    // states:SendTaskSuccess no admite permisos a nivel de recurso (misma
+    // excepcion ya documentada en evidence-callback-handlers.ts): unica
+    // accion con Resource:"*" en el rol de esta Lambda.
+    requestHumanDecisionFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["states:SendTaskSuccess"],
+        resources: ["*"],
+      }),
+    );
+
+    const reconcileHumanDecisionFn = new lambdaNodejs.NodejsFunction(this, "ReconcileHumanDecisionFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-reconcileHumanDecision",
+      entry: path.join(ORCHESTRATION_ENTRY_ROOT, "reconcileHumanDecisionFn.ts"),
+      environment: {
+        CASE_ACTION_CALLBACKS_TABLE_NAME: props.caseActionCallbacksTable.tableName,
+      },
+    });
+    props.caseActionCallbacksTable.grant(reconcileHumanDecisionFn, "dynamodb:UpdateItem");
+
+    // Determinista, SIN permisos Connect (ver AGENTS.md: "El LLM no tiene
+    // permisos IAM para Connect, no puede cerrar casos ni seleccionar
+    // telefonos" -- lo mismo aplica a cualquier Lambda que no sea
+    // EmergencyDialer). Solo lee/escribe DynamoDB y EventLog.
+    const escalationPolicyFn = new lambdaNodejs.NodejsFunction(this, "EscalationPolicyFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-escalationPolicy",
+      entry: path.join(ESCALATION_ENTRY_ROOT, "escalationPolicyFn.ts"),
+      environment: {
+        ANOMALY_CASES_TABLE_NAME: props.anomalyCasesTable.tableName,
+        DEVICES_TABLE_NAME: props.devicesTable.tableName,
+        EVENT_LOG_TABLE_NAME: props.eventLogTable.tableName,
+        HUMAN_NOTIFICATION_CHANNEL_CONFIRMED: String(props.humanNotificationChannelConfirmed ?? false),
+        ESCALATION_ALLOWED_DEVICE_IDS: props.escalationAllowedDeviceIds.join(","),
+      },
+    });
+    props.anomalyCasesTable.grant(escalationPolicyFn, "dynamodb:GetItem", "dynamodb:UpdateItem");
+    props.devicesTable.grant(escalationPolicyFn, "dynamodb:GetItem");
+    props.eventLogTable.grant(escalationPolicyFn, "dynamodb:PutItem");
+
+    // UNICA Lambda de todo SenseCare con connect:StartOutboundVoiceContact
+    // (ver services/escalation/src/emergencyDialerFn.ts). Sin acceso a
+    // AnomalyCases/EventLog en absoluto -- recordCallOutcomeFn hace esas
+    // escrituras a partir de su output.
+    const emergencyDialerFn = new lambdaNodejs.NodejsFunction(this, "EmergencyDialerFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-emergencyDialer",
+      entry: path.join(ESCALATION_ENTRY_ROOT, "emergencyDialerFn.ts"),
+      environment: {
+        CONNECT_INSTANCE_ID: props.connectInstanceId,
+        CONNECT_CONTACT_FLOW_ID: props.connectContactFlowId,
+        CONNECT_SOURCE_PHONE_NUMBER: props.connectSourcePhoneNumber,
+        FALLBACK_CALL_DESTINATION_PARAMETER_NAME: props.fallbackCallDestinationParameterName,
+      },
+    });
+    // ssm:GetParameter acotado al ARN exacto del parametro (nunca ssm:*).
+    emergencyDialerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [props.fallbackCallDestinationParameterArn],
+      }),
+    );
+    // kms:Decrypt acotado a la CMK exacta (nunca kms:* ni "Resource: *").
+    props.fallbackCallCmk.grantDecrypt(emergencyDialerFn);
+    // connect:StartOutboundVoiceContact NO admite permisos a nivel de
+    // recurso (confirmado contra la referencia de acciones IAM de Amazon
+    // Connect): unica excepcion aceptada explicitamente por el
+    // coordinador, limitada a esta accion y a este rol exclusivamente.
+    // Nunca connect:* ni Resource:"*" en ninguna otra accion de este rol.
+    emergencyDialerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["connect:StartOutboundVoiceContact"],
+        resources: ["*"],
+      }),
+    );
+
+    // Sin Connect/SSM/KMS: solo transiciona dialStatus a su estado final y
+    // audita, a partir del output ya producido por emergencyDialerFn.
+    const recordCallOutcomeFn = new lambdaNodejs.NodejsFunction(this, "RecordCallOutcomeFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-recordCallOutcome",
+      entry: path.join(ESCALATION_ENTRY_ROOT, "recordCallOutcomeFn.ts"),
+      environment: {
+        ANOMALY_CASES_TABLE_NAME: props.anomalyCasesTable.tableName,
+        EVENT_LOG_TABLE_NAME: props.eventLogTable.tableName,
+      },
+    });
+    props.anomalyCasesTable.grant(recordCallOutcomeFn, "dynamodb:UpdateItem");
+    props.eventLogTable.grant(recordCallOutcomeFn, "dynamodb:PutItem");
+
     // --- State Machine ---
     // Cada Task del tramo de registro recibe { caseDetail: $, executionArn:
     // $$.Execution.Id } y descarta su propio resultado (JsonPath.DISCARD),
@@ -429,7 +558,151 @@ export class CaseOrchestration extends Construct {
 
     // --- Tramo de analisis (Bedrock) ---
 
-    const caseAnalysisPhaseComplete = new sfn.Succeed(this, "CaseAnalysisPhaseComplete");
+    // --- Hito de escalamiento: espera de decision humana + EscalationPolicy + EmergencyDialer ---
+    // Construido ANTES de notifyCaregiversIfNotAlreadyTask (mas abajo) para
+    // poder referenciarlo como destino de su .next()/.addCatch(): en este
+    // hito, notificar a los cuidadores siempre continua hacia la espera de
+    // decision humana, nunca hacia un Succeed terminal.
+
+    const caseResolvedByCancel = new sfn.Succeed(this, "CaseResolvedByCancel");
+    const caseEscalatedBlocked = new sfn.Succeed(this, "CaseEscalatedBlocked");
+    const caseEscalationComplete = new sfn.Succeed(this, "CaseEscalationComplete");
+
+    const recordCallOutcomeFailed = new sfn.Fail(this, "RecordCallOutcomeFailed", {
+      error: "RecordCallOutcomeFailed",
+      cause: "No se pudo registrar el resultado de la llamada de emergencia; revisar CloudWatch Logs y EventLog.",
+    });
+
+    const recordCallOutcomeTask = new tasks.LambdaInvoke(this, "RecordCallOutcome", {
+      lambdaFunction: recordCallOutcomeFn,
+      payload: sfn.TaskInput.fromObject({
+        "caseId.$": "$.caseDetail.caseId",
+        "dialResult.$": "$.dialResult",
+      }),
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+      retryOnServiceExceptions: true,
+    });
+    recordCallOutcomeTask.addCatch(recordCallOutcomeFailed, { errors: [sfn.Errors.ALL], resultPath: "$.error" });
+    recordCallOutcomeTask.next(caseEscalationComplete);
+
+    // Un fallo de INVOCACION del propio Lambda (no un rechazo de Connect,
+    // que emergencyDialerFn.ts ya atrapa internamente y retorna como
+    // {outcome:"FAILED"}) se mapea al mismo resultado FAILED, nunca a un
+    // cierre silencioso ni a una llamada que en realidad no ocurrio.
+    const mapToDialInvocationError = new sfn.Pass(this, "MapToDialInvocationError", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        dialResult: { outcome: "FAILED", errorCode: "DIAL_INVOCATION_ERROR" },
+      },
+    });
+    mapToDialInvocationError.next(recordCallOutcomeTask);
+
+    const emergencyDialerTask = new tasks.LambdaInvoke(this, "EmergencyDialer", {
+      lambdaFunction: emergencyDialerFn,
+      // Solo caseId: EmergencyDialer nunca recibe deviceId/recipientId/
+      // anomalyType ni ningun dato que pudiera sugerir de donde sale el
+      // destino (ver services/escalation/src/emergencyDialerFn.ts).
+      payload: sfn.TaskInput.fromObject({
+        "caseId.$": "$.caseDetail.caseId",
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.dialResult",
+      retryOnServiceExceptions: true,
+    });
+    emergencyDialerTask.addCatch(mapToDialInvocationError, { errors: [sfn.Errors.ALL], resultPath: "$.dialError" });
+    emergencyDialerTask.next(recordCallOutcomeTask);
+
+    const escalationAllowedChoice = new sfn.Choice(this, "EscalationAllowed?")
+      .when(sfn.Condition.booleanEquals("$.escalationDecision.allowed", true), emergencyDialerTask)
+      .otherwise(caseEscalatedBlocked);
+
+    // Un fallo de INVOCACION del propio EscalationPolicy (no una condicion
+    // de negocio que ya bloquea con un codigo cerrado -- eso es el output
+    // normal de la Lambda, nunca una excepcion) se mapea a bloqueado, nunca
+    // a una llamada. Mismo principio que MapToError en el tramo de
+    // evidencia: nunca "safe"/permitido por defecto ante un error tecnico.
+    const mapToEscalationPolicyError = new sfn.Pass(this, "MapToEscalationPolicyError", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        escalationDecision: { allowed: false, reason: "ESCALATION_POLICY_INVOCATION_ERROR" },
+      },
+    });
+    mapToEscalationPolicyError.next(escalationAllowedChoice);
+
+    const escalationPolicyTask = new tasks.LambdaInvoke(this, "EscalationPolicy", {
+      lambdaFunction: escalationPolicyFn,
+      payload: sfn.TaskInput.fromObject({
+        "caseDetail.$": "$.caseDetail",
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.escalationDecision",
+      retryOnServiceExceptions: true,
+    });
+    escalationPolicyTask.addCatch(mapToEscalationPolicyError, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.escalationError",
+    });
+    escalationPolicyTask.next(escalationAllowedChoice);
+
+    // Incondicional (ver reconcileHumanDecisionFn.ts): nunca deja un
+    // taskToken de un wait ya resuelto/vencido en un estado ambiguo antes
+    // de que EscalationPolicy vuelva a verificar humanDecision en caliente.
+    // Un fallo de invocacion NUNCA bloquea el avance hacia EscalationPolicy
+    // (ese chequeo es independiente de esta tabla efimera).
+    const reconcileHumanDecisionCallbackTask = new tasks.LambdaInvoke(this, "ReconcileHumanDecisionCallback", {
+      lambdaFunction: reconcileHumanDecisionFn,
+      payload: sfn.TaskInput.fromObject({
+        "caseDetail.$": "$.caseDetail",
+      }),
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+      retryOnServiceExceptions: true,
+    });
+    reconcileHumanDecisionCallbackTask.addCatch(escalationPolicyTask, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.reconcileError",
+    });
+    reconcileHumanDecisionCallbackTask.next(escalationPolicyTask);
+
+    // Unico punto de decision "CANCEL_ALERT detiene el fallback" (ver
+    // AGENTS.md). ESCALATED y TIMEOUT convergen al mismo camino:
+    // ESCALATE solo adelanta la intencion humana, nunca evita que
+    // EscalationPolicy vuelva a verificar todas sus condiciones.
+    const humanDecisionChoice = new sfn.Choice(this, "HumanDecisionMade?")
+      .when(sfn.Condition.stringEquals("$.humanDecisionResult.decision", "CANCELLED"), caseResolvedByCancel)
+      .otherwise(reconcileHumanDecisionCallbackTask);
+
+    // States.Timeout y cualquier otro error tecnico convergen al MISMO
+    // destino a proposito (ver diseno aprobado): nunca "safe" por defecto,
+    // ambos deben seguir pasando por EscalationPolicy.
+    const mapToHumanDecisionTimeout = new sfn.Pass(this, "MapToHumanDecisionTimeout", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        humanDecisionResult: { decision: "TIMEOUT" },
+      },
+    });
+    mapToHumanDecisionTimeout.next(humanDecisionChoice);
+
+    const requestHumanDecisionTask = new tasks.LambdaInvoke(this, "RequestHumanDecision", {
+      lambdaFunction: requestHumanDecisionFn,
+      integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+      payload: sfn.TaskInput.fromObject({
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        taskToken: sfn.JsonPath.taskToken,
+      }),
+      // Plazo de demo para que un cuidador decida CANCEL_ALERT/ESCALATE
+      // antes de que EscalationPolicy evalue el fallback automaticamente.
+      taskTimeout: sfn.Timeout.duration(cdk.Duration.seconds(props.humanDecisionWaitSeconds ?? 300)),
+      resultPath: "$.humanDecisionResult",
+    });
+    requestHumanDecisionTask.addCatch(mapToHumanDecisionTimeout, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.humanDecisionError",
+    });
+    requestHumanDecisionTask.next(humanDecisionChoice);
 
     // --- Push dirigido (hito de notificaciones, opcional) ---
     // MISMA Lambda invocada en los DOS mismos puntos que dispatchAlertFn
@@ -488,11 +761,14 @@ export class CaseOrchestration extends Construct {
         resultPath: sfn.JsonPath.DISCARD,
         retryOnServiceExceptions: true,
       });
-      dispatchPushIfNotAlreadyTask.addCatch(caseAnalysisPhaseComplete, {
+      // Igual que dispatchAlertImmediateTask: un fallo de invocacion de push
+      // nunca debe impedir que el caso llegue a la espera de decision humana
+      // (hito de escalamiento) -- nunca un dead-end.
+      dispatchPushIfNotAlreadyTask.addCatch(requestHumanDecisionTask, {
         errors: [sfn.Errors.ALL],
         resultPath: "$.pushError",
       });
-      dispatchPushIfNotAlreadyTask.next(caseAnalysisPhaseComplete);
+      dispatchPushIfNotAlreadyTask.next(requestHumanDecisionTask);
     }
 
     // dispatchAlertImmediateTask.next() diferido hasta aqui (ver su
@@ -520,13 +796,18 @@ export class CaseOrchestration extends Construct {
       resultPath: sfn.JsonPath.DISCARD,
       retryOnServiceExceptions: true,
     });
-    notifyCaregiversIfNotAlreadyTask.addCatch(caseAnalysisPhaseComplete, {
+    // Un fallo de invocacion (no del envio de SNS, que dispatchAlertFn ya
+    // atrapa internamente) nunca debe impedir que el caso llegue a la
+    // espera de decision humana: nunca dead-end.
+    notifyCaregiversIfNotAlreadyTask.addCatch(requestHumanDecisionTask, {
       errors: [sfn.Errors.ALL],
       resultPath: "$.alertError",
     });
     // Inserta el push de red-de-seguridad en la cadena solo si existe (ver
-    // bloque "Push dirigido" mas arriba).
-    notifyCaregiversIfNotAlreadyTask.next(dispatchPushIfNotAlreadyTask ?? caseAnalysisPhaseComplete);
+    // bloque "Push dirigido" mas arriba); en cualquier caso, la cadena
+    // siempre continua hacia la espera de decision humana del hito de
+    // escalamiento -- nunca un Succeed terminal.
+    notifyCaregiversIfNotAlreadyTask.next(dispatchPushIfNotAlreadyTask ?? requestHumanDecisionTask);
 
     const analysisRecordingFailed = new sfn.Fail(this, "AnalysisOutcomeRecordingFailed", {
       error: "AnalysisOutcomeRecordingFailed",

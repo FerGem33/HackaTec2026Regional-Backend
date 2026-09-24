@@ -2,6 +2,7 @@ import { App, Stack } from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as kms from "aws-cdk-lib/aws-kms";
 import * as events from "aws-cdk-lib/aws-events";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -93,6 +94,11 @@ function synth(): { template: Template; stack: Stack } {
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
   const alertsTopic = new sns.Topic(stack, "AlertsTopic");
+  const caseActionCallbacksTable = new dynamodb.Table(stack, "CaseActionCallbacksTable", {
+    partitionKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "callbackType", type: dynamodb.AttributeType.STRING },
+  });
+  const fallbackCallCmk = new kms.Key(stack, "FallbackCallDestinationKey");
 
   new CaseOrchestration(stack, "CaseOrchestration", {
     eventBus,
@@ -111,6 +117,17 @@ function synth(): { template: Template; stack: Stack } {
     alertsTable,
     caregiverAccessTable,
     alertsTopic,
+    // Hito de escalamiento: valores ficticios explicitos, nunca una
+    // instancia/numero real de Connect ni un parametro SSM real.
+    caseActionCallbacksTable,
+    fallbackCallCmk,
+    fallbackCallDestinationParameterName: "/sensecare/demo/fallback-call-destination-test",
+    fallbackCallDestinationParameterArn:
+      "arn:aws:ssm:us-east-1:123456789012:parameter/sensecare/demo/fallback-call-destination-test",
+    connectInstanceId: "11111111-1111-1111-1111-111111111111",
+    connectContactFlowId: "22222222-2222-2222-2222-222222222222",
+    connectSourcePhoneNumber: "+10000000000",
+    escalationAllowedDeviceIds: ["pi-demo-01", "sim-room-01"],
   });
 
   return { template: Template.fromStack(stack), stack };
@@ -124,6 +141,34 @@ function policyStatements(template: Template): Array<{ Action: unknown; Resource
         p as { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } } }
       ).Properties.PolicyDocument.Statement,
   );
+}
+
+/**
+ * A diferencia de policyStatements (todas las statements de TODAS las
+ * Lambdas mezcladas), esto localiza el Role propio de una Lambda por su
+ * FunctionName y devuelve solo las statements inline de ese Role, para
+ * poder afirmar negativos precisos ("esta Lambda, y solo esta, no tiene
+ * connect:/ssm:/kms:") sin falsos positivos de otras Lambdas del stack.
+ */
+function functionOwnPolicyStatements(
+  template: Template,
+  functionName: string,
+): Array<{ Action: unknown; Resource: unknown }> {
+  const functions = template.findResources("AWS::Lambda::Function");
+  const [fn] = Object.values(functions).filter(
+    (f) => (f as { Properties: { FunctionName?: string } }).Properties.FunctionName === functionName,
+  ) as Array<{ Properties: { Role: { "Fn::GetAtt": [string, string] } } }>;
+  expect(fn).toBeDefined();
+  const roleLogicalId = fn.Properties.Role["Fn::GetAtt"][0];
+
+  const policies = template.findResources("AWS::IAM::Policy");
+  const ownPolicies = Object.values(policies).filter((p) =>
+    (
+      (p as { Properties: { Roles: Array<{ Ref: string }> } }).Properties.Roles ?? []
+    ).some((r) => r.Ref === roleLogicalId),
+  ) as Array<{ Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } } }>;
+
+  return ownPolicies.flatMap((p) => p.Properties.PolicyDocument.Statement);
 }
 
 describe("CaseOrchestration", () => {
@@ -149,14 +194,16 @@ describe("CaseOrchestration", () => {
     }
   });
 
-  it("creates exactly the 8 task Lambdas invoked by the state machine", () => {
+  it("creates exactly the 13 task Lambdas invoked by the state machine", () => {
     const { template } = synth();
     const functions = template.findResources("AWS::Lambda::Function");
-    // 8 tasks (renew, upsert, dispatchAlert, cameraConsent,
+    // 13 tasks (renew, upsert, dispatchAlert, cameraConsent,
     // requestEvidenceUpload, recordEvidenceOutcome, analyzeEvidence,
-    // recordAnalysisOutcome -- dispatchAlert se invoca dos veces en la
-    // maquina pero es un unico Lambda) + el dispatcher de EventBridge = 9.
-    expect(Object.keys(functions)).toHaveLength(9);
+    // recordAnalysisOutcome, requestHumanDecision, reconcileHumanDecision,
+    // escalationPolicy, emergencyDialer, recordCallOutcome --
+    // dispatchAlert se invoca dos veces en la maquina pero es un unico
+    // Lambda) + el dispatcher de EventBridge = 14.
+    expect(Object.keys(functions)).toHaveLength(14);
   });
 
   it("wires the registration phase (RenewOpenCaseLock -> UpsertAnomalyCase) with Retry and a Catch to CaseRegistrationFailed", () => {
@@ -318,7 +365,7 @@ describe("CaseOrchestration", () => {
     });
   });
 
-  it("scopes the state machine's execution role to exactly the eight task Lambda ARNs (no wildcard function resource)", () => {
+  it("scopes the state machine's execution role to exactly the thirteen task Lambda ARNs (no wildcard function resource)", () => {
     const { template } = synth();
     const roles = template.findResources("AWS::IAM::Role");
     const [stateMachineRoleId] = Object.entries(roles)
@@ -345,7 +392,7 @@ describe("CaseOrchestration", () => {
     // Cada Task otorga su propio grantInvoke (Arn + Arn:* para alias), sin
     // fusionarse en un unico statement; se cuentan los ARNs base distintos
     // (Fn::GetAtt directo, sin el sufijo ":*" de alias) para verificar que
-    // son exactamente las 8 Lambdas de tarea, ninguna de mas ni de menos
+    // son exactamente las 13 Lambdas de tarea, ninguna de mas ni de menos
     // (dispatchAlertFn cuenta una sola vez pese a invocarse dos veces).
     const baseArnKeys = new Set(
       invokeStatements.flatMap((s) => {
@@ -359,7 +406,7 @@ describe("CaseOrchestration", () => {
       }),
     );
 
-    expect(baseArnKeys.size).toBe(8);
+    expect(baseArnKeys.size).toBe(13);
   });
 
   it("gives renewOpenCaseLockFn only dynamodb:UpdateItem on OpenCaseLocks", () => {
@@ -485,14 +532,17 @@ describe("CaseOrchestration", () => {
     template.resourceCountIs("AWS::Events::Rule", 1);
   });
 
-  it("never grants a wildcard IAM action or resource, and no AdministratorAccess anywhere", () => {
-    // A diferencia de evidence-callback-handlers.ts (que SI necesita
-    // Resource:"*" para states:SendTaskSuccess/Failure, la unica excepcion
-    // documentada del paquete), esta construccion no llama SendTask* en
-    // absoluto: sus Lambdas de tarea solo leen/escriben DynamoDB, S3,
-    // iot:Publish y sns:Publish, todo escopado a ARNs/prefijos concretos.
+  it("never grants a wildcard IAM action, and only the 2 explicitly-approved actions ever use Resource:'*' (neither supports resource-level permissions)", () => {
+    // states:SendTaskSuccess (requestHumanDecisionFn) sigue el mismo patron
+    // ya documentado en evidence-callback-handlers.ts. connect:
+    // StartOutboundVoiceContact (emergencyDialerFn) es una excepcion nueva,
+    // confirmada contra la referencia de IAM de Amazon Connect y aprobada
+    // explicitamente por el coordinador (ver hito de escalamiento) --
+    // limitada a esa unica accion, en el rol de esa unica Lambda. Ninguna
+    // otra accion de ningun otro Lambda de este construct usa Resource:"*".
     const { template } = synth();
     const statements = policyStatements(template);
+    const APPROVED_WILDCARD_RESOURCE_ACTIONS = ["states:SendTaskSuccess", "connect:StartOutboundVoiceContact"];
 
     for (const statement of statements) {
       const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
@@ -501,7 +551,24 @@ describe("CaseOrchestration", () => {
       expect(JSON.stringify(actions)).not.toContain("states:*");
       expect(JSON.stringify(actions)).not.toContain("s3:*");
       expect(JSON.stringify(actions)).not.toContain("sns:*");
-      expect(statement.Resource).not.toBe("*");
+      expect(JSON.stringify(actions)).not.toContain("connect:*");
+      expect(JSON.stringify(actions)).not.toContain("ssm:*");
+      expect(JSON.stringify(actions)).not.toContain("kms:*");
+
+      if (statement.Resource === "*") {
+        expect(actions).toHaveLength(1);
+        expect(APPROVED_WILDCARD_RESOURCE_ACTIONS).toContain(actions[0]);
+      }
+    }
+
+    // Exactamente una statement por cada una de las 2 excepciones (nunca
+    // fusionadas entre si ni con ninguna otra accion).
+    for (const approvedAction of APPROVED_WILDCARD_RESOURCE_ACTIONS) {
+      const matching = statements.filter((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.length === 1 && actions[0] === approvedAction && s.Resource === "*";
+      });
+      expect(matching).toHaveLength(1);
     }
 
     template.resourcePropertiesCountIs(
@@ -527,11 +594,12 @@ describe("CaseOrchestration", () => {
 
     const notify = definition.States.NotifyCaregiversIfNotAlready;
     expect(notify?.Type).toBe("Task");
-    expect(notify?.Next).toBe("CaseAnalysisPhaseComplete");
-    // Un fallo de invocacion nunca debe impedir que la ejecucion concluya.
+    expect(notify?.Next).toBe("RequestHumanDecision");
+    // Un fallo de invocacion nunca debe impedir que el caso llegue a la
+    // espera de decision humana: nunca dead-end.
     expect(notify?.Catch?.[0]).toMatchObject({
       ErrorEquals: ["States.ALL"],
-      Next: "CaseAnalysisPhaseComplete",
+      Next: "RequestHumanDecision",
     });
   });
 
@@ -598,7 +666,7 @@ describe("CaseOrchestration", () => {
     }
   });
 
-  it("converges every analysis outcome into RecordAnalysisOutcome -> NotifyCaregiversIfNotAlready -> CaseAnalysisPhaseComplete, with a Fail state as the last resort", () => {
+  it("converges every analysis outcome into RecordAnalysisOutcome -> NotifyCaregiversIfNotAlready -> RequestHumanDecision, with a Fail state as the last resort", () => {
     const { template } = synth();
     const definition = parseStateMachineDefinition(template);
 
@@ -613,9 +681,105 @@ describe("CaseOrchestration", () => {
       Next: "AnalysisOutcomeRecordingFailed",
     });
 
-    expect(definition.States.NotifyCaregiversIfNotAlready?.Next).toBe("CaseAnalysisPhaseComplete");
-    expect(definition.States.CaseAnalysisPhaseComplete?.Type).toBe("Succeed");
+    expect(definition.States.NotifyCaregiversIfNotAlready?.Next).toBe("RequestHumanDecision");
     expect(definition.States.AnalysisOutcomeRecordingFailed?.Type).toBe("Fail");
+  });
+
+  it("RequestHumanDecision waits for a task token with a configurable timeout, and any error (including States.Timeout) maps to decision:TIMEOUT", () => {
+    const { template } = synth();
+    const definition = parseStateMachineDefinition(template);
+
+    const wait = definition.States.RequestHumanDecision;
+    expect(wait?.Type).toBe("Task");
+    expect(wait?.TimeoutSeconds).toBe(300); // default humanDecisionWaitSeconds
+    expect(wait?.Next).toBe("HumanDecisionMade?");
+    expect(wait?.Catch?.[0]).toMatchObject({
+      ErrorEquals: ["States.ALL"],
+      Next: "MapToHumanDecisionTimeout",
+    });
+
+    const mapToTimeout = definition.States.MapToHumanDecisionTimeout;
+    expect(mapToTimeout?.Type).toBe("Pass");
+    expect(mapToTimeout?.Parameters?.humanDecisionResult).toEqual({ decision: "TIMEOUT" });
+    expect(mapToTimeout?.Next).toBe("HumanDecisionMade?");
+  });
+
+  it("HumanDecisionMade?: CANCELLED resolves the case immediately; ESCALATED/TIMEOUT both continue to EscalationPolicy via the reconcile step", () => {
+    const { template } = synth();
+    const definition = parseStateMachineDefinition(template);
+
+    const choice = definition.States["HumanDecisionMade?"];
+    expect(choice?.Type).toBe("Choice");
+    expect(choice?.Choices?.[0]).toMatchObject({
+      Variable: "$.humanDecisionResult.decision",
+      Next: "CaseResolvedByCancel",
+    });
+    expect(choice?.Default).toBe("ReconcileHumanDecisionCallback");
+
+    expect(definition.States.CaseResolvedByCancel?.Type).toBe("Succeed");
+
+    const reconcile = definition.States.ReconcileHumanDecisionCallback;
+    expect(reconcile?.Type).toBe("Task");
+    expect(reconcile?.Next).toBe("EscalationPolicy");
+    // Un fallo de invocacion nunca bloquea el avance hacia EscalationPolicy.
+    expect(reconcile?.Catch?.[0]).toMatchObject({
+      ErrorEquals: ["States.ALL"],
+      Next: "EscalationPolicy",
+    });
+  });
+
+  it("EscalationPolicy: allowed -> EmergencyDialer -> RecordCallOutcome -> Succeed; blocked (or a technical error) -> CaseEscalatedBlocked, never a call", () => {
+    const { template } = synth();
+    const definition = parseStateMachineDefinition(template);
+
+    const policy = definition.States.EscalationPolicy;
+    expect(policy?.Type).toBe("Task");
+    expect(policy?.Next).toBe("EscalationAllowed?");
+    expect(policy?.Catch?.[0]).toMatchObject({
+      ErrorEquals: ["States.ALL"],
+      Next: "MapToEscalationPolicyError",
+    });
+
+    const mapToError = definition.States.MapToEscalationPolicyError;
+    expect(mapToError?.Type).toBe("Pass");
+    expect(mapToError?.Parameters?.escalationDecision).toEqual({
+      allowed: false,
+      reason: "ESCALATION_POLICY_INVOCATION_ERROR",
+    });
+    expect(mapToError?.Next).toBe("EscalationAllowed?");
+
+    const choice = definition.States["EscalationAllowed?"];
+    expect(choice?.Type).toBe("Choice");
+    expect(choice?.Choices?.[0]).toMatchObject({
+      Variable: "$.escalationDecision.allowed",
+      BooleanEquals: true,
+      Next: "EmergencyDialer",
+    });
+    expect(choice?.Default).toBe("CaseEscalatedBlocked");
+    expect(definition.States.CaseEscalatedBlocked?.Type).toBe("Succeed");
+
+    const dialer = definition.States.EmergencyDialer;
+    expect(dialer?.Type).toBe("Task");
+    expect(dialer?.Next).toBe("RecordCallOutcome");
+    expect(dialer?.Catch?.[0]).toMatchObject({
+      ErrorEquals: ["States.ALL"],
+      Next: "MapToDialInvocationError",
+    });
+
+    const mapToDialError = definition.States.MapToDialInvocationError;
+    expect(mapToDialError?.Type).toBe("Pass");
+    expect(mapToDialError?.Parameters?.dialResult).toEqual({ outcome: "FAILED", errorCode: "DIAL_INVOCATION_ERROR" });
+    expect(mapToDialError?.Next).toBe("RecordCallOutcome");
+
+    const recordOutcome = definition.States.RecordCallOutcome;
+    expect(recordOutcome?.Type).toBe("Task");
+    expect(recordOutcome?.Next).toBe("CaseEscalationComplete");
+    expect(recordOutcome?.Catch?.[0]).toMatchObject({
+      ErrorEquals: ["States.ALL"],
+      Next: "RecordCallOutcomeFailed",
+    });
+    expect(definition.States.CaseEscalationComplete?.Type).toBe("Succeed");
+    expect(definition.States.RecordCallOutcomeFailed?.Type).toBe("Fail");
   });
 
   it("gives analyzeEvidenceFn only s3:GetObject on raw-images/*, bedrock:InvokeModel scoped to the profile + foundation models with the InferenceProfileArn condition, and PutItem on EventLog only", () => {
@@ -689,5 +853,124 @@ describe("CaseOrchestration", () => {
     // (AnomalyCases + EvidenceCallbacks) + recordAnalysisOutcomeFn
     // (AnomalyCases).
     expect(updateOnlyStatements.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("gives requestHumanDecisionFn only GetItem/PutItem/UpdateItem on its own tables plus states:SendTaskSuccess, nothing on Connect/SSM/KMS", () => {
+    const { template } = synth();
+    const own = functionOwnPolicyStatements(template, "SenseCare-requestHumanDecision");
+    const json = JSON.stringify(own);
+
+    expect(json).not.toContain("connect:");
+    expect(json).not.toContain("ssm:");
+    expect(json).not.toContain("kms:");
+    expect(own.some((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]).includes("dynamodb:GetItem"))).toBe(
+      true,
+    );
+    expect(own.some((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]).includes("states:SendTaskSuccess"))).toBe(
+      true,
+    );
+  });
+
+  it("gives reconcileHumanDecisionFn only dynamodb:UpdateItem on CaseActionCallbacks, nothing on Connect/SSM/KMS/States", () => {
+    const { template } = synth();
+    const own = functionOwnPolicyStatements(template, "SenseCare-reconcileHumanDecision");
+    const json = JSON.stringify(own);
+
+    expect(json).not.toContain("connect:");
+    expect(json).not.toContain("ssm:");
+    expect(json).not.toContain("kms:");
+    expect(json).not.toContain("states:");
+    expect(
+      own.every((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.length === 1 && actions[0] === "dynamodb:UpdateItem";
+      }),
+    ).toBe(true);
+  });
+
+  it("gives escalationPolicyFn only GetItem/UpdateItem on AnomalyCases, GetItem on Devices and PutItem on EventLog, nothing on Connect/SSM/KMS", () => {
+    const { template } = synth();
+    const own = functionOwnPolicyStatements(template, "SenseCare-escalationPolicy");
+    const json = JSON.stringify(own);
+
+    expect(json).not.toContain("connect:");
+    expect(json).not.toContain("ssm:");
+    expect(json).not.toContain("kms:");
+
+    const allActions = own.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+    expect(allActions).toEqual(
+      expect.arrayContaining(["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem"]),
+    );
+  });
+
+  it("gives emergencyDialerFn exactly ssm:GetParameter (scoped to the exact parameter ARN), kms:Decrypt (scoped to the exact CMK), and connect:StartOutboundVoiceContact (Resource:'*', the one documented exception) -- nothing else", () => {
+    const { template } = synth();
+    const own = functionOwnPolicyStatements(template, "SenseCare-emergencyDialer");
+
+    const ssmStatement = own.find((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.length === 1 && actions[0] === "ssm:GetParameter";
+    });
+    expect(ssmStatement).toBeDefined();
+    expect(ssmStatement?.Resource).not.toBe("*");
+    expect(JSON.stringify(ssmStatement?.Resource)).toContain("fallback-call-destination");
+
+    const kmsStatement = own.find((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.includes("kms:Decrypt");
+    });
+    expect(kmsStatement).toBeDefined();
+    expect(kmsStatement?.Resource).not.toBe("*");
+
+    const connectStatement = own.find((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.length === 1 && actions[0] === "connect:StartOutboundVoiceContact";
+    });
+    expect(connectStatement).toBeDefined();
+    expect(connectStatement?.Resource).toBe("*");
+
+    // Ninguna otra accion se cuela en el role de EmergencyDialer: solo las
+    // 3 explicitamente documentadas.
+    const allActions = own.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+    expect(new Set(allActions)).toEqual(
+      new Set(["ssm:GetParameter", "kms:Decrypt", "connect:StartOutboundVoiceContact"]),
+    );
+  });
+
+  it("gives recordCallOutcomeFn only dynamodb:UpdateItem on AnomalyCases and PutItem on EventLog, nothing on Connect/SSM/KMS", () => {
+    const { template } = synth();
+    const own = functionOwnPolicyStatements(template, "SenseCare-recordCallOutcome");
+    const json = JSON.stringify(own);
+
+    expect(json).not.toContain("connect:");
+    expect(json).not.toContain("ssm:");
+    expect(json).not.toContain("kms:");
+
+    const allActions = own.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+    expect(allActions).toEqual(expect.arrayContaining(["dynamodb:UpdateItem", "dynamodb:PutItem"]));
+  });
+
+  it("no Lambda other than emergencyDialerFn has any connect: permission anywhere in the construct (including analyzeEvidenceFn/Bedrock-adjacent ones)", () => {
+    const { template } = synth();
+    const functionNames = [
+      "SenseCare-renewOpenCaseLock",
+      "SenseCare-upsertAnomalyCase",
+      "SenseCare-caseDispatcher",
+      "SenseCare-cameraConsent",
+      "SenseCare-requestEvidenceUpload",
+      "SenseCare-recordEvidenceOutcome",
+      "SenseCare-analyzeEvidence",
+      "SenseCare-recordAnalysisOutcome",
+      "SenseCare-dispatchAlert",
+      "SenseCare-requestHumanDecision",
+      "SenseCare-reconcileHumanDecision",
+      "SenseCare-escalationPolicy",
+      "SenseCare-recordCallOutcome",
+    ];
+
+    for (const functionName of functionNames) {
+      const own = functionOwnPolicyStatements(template, functionName);
+      expect(JSON.stringify(own)).not.toContain("connect:");
+    }
   });
 });
