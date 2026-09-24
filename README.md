@@ -98,6 +98,7 @@ Fuera de alcance:
 - [Guía de implementación edge: Raspberry Pi 4B + ESP32](docs/EDGE_IMPLEMENTATION_GUIDE.md)
 - [Configuración de subagentes para Claude Code](docs/CLAUDE_MULTIAGENT_SETUP.md)
 - [Guía de desarrollo del monorepo (contratos, pruebas, simulador)](docs/DEVELOPMENT.md)
+- [Guía de integración del simulador de demo](docs/SIMULATOR_INTEGRATION_GUIDE.md)
 
 ## Estado
 

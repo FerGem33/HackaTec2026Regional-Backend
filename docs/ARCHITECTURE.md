@@ -99,7 +99,7 @@ AWS IoT Core usa MQTT y su Rules Engine puede enrutar mensajes hacia S3, DynamoD
 ### 2. Investigación de una anomalía
 
 1. El evento visual o de sensor abre/reutiliza un `AnomalyCase`; EventBridge inicia una ejecución **Step Functions Standard** nombrada con el `caseId`.
-2. Para anomalía visual, la Pi conserva en memoria el frame asociado. Para una anomalía de sensor, la máquina puede solicitar un frame actual puntual y fresco. Tras comprobar consentimiento de cámara, envía `UPLOAD_EVIDENCE` con `captureMode` (`BUFFERED` o `CURRENT`), URL prefirmada, llave S3 y `taskToken`. Sólo entonces la Pi sube esa foto puntual.
+2. Para anomalía visual, la Pi conserva en memoria el frame asociado. Para una anomalía de sensor, la máquina puede solicitar un frame actual puntual y fresco. Tras comprobar consentimiento de cámara, envía `UPLOAD_EVIDENCE` con `commandId`, `caseId`, `captureMode` (`BUFFERED` o `CURRENT`), URL prefirmada, llave S3 y vencimiento. Sólo entonces la Pi sube esa foto puntual. Los tokens internos de callback de Step Functions nunca salen de AWS.
 3. `visionProcessor` asocia la imagen al `caseId` y devuelve la observación a la ejecución. Sólo entonces se invoca Bedrock con evidencia estructurada.
 4. Un error, timeout o incertidumbre del análisis significa `uncertain`, nunca `safe` ni cierre automático.
 
@@ -127,8 +127,9 @@ Ejemplo de telemetría:
 
 ```json
 {
-  "eventId": "01J...",
-  "timestamp": "2026-09-23T18:30:00Z",
+  "eventId": "550e8400-e29b-41d4-a716-446655440000",
+  "deviceId": "pi-demo-01",
+  "occurredAt": "2026-09-23T18:30:00Z",
   "temperatureC": 27.3,
   "humidityPct": 48.1,
   "co2Ppm": 840,
@@ -145,7 +146,6 @@ Ejemplo de candidato visual, sin frame ni video en MQTT:
   "eventId": "uuid",
   "eventType": "VISUAL_ANOMALY",
   "deviceId": "pi-demo-01",
-  "recipientId": "recipient-demo-01",
   "occurredAt": "2026-09-23T18:30:00Z",
   "anomalyType": "PERSON_PRONE_INACTIVE",
   "confidence": 0.87,
