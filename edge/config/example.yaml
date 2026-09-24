@@ -1,0 +1,38 @@
+# Copiar a /etc/SenseCare/config.yaml en la Raspberry Pi. No incluir secretos aqui;
+# los certificados van aparte en iot.*Path con permisos restringidos (ver EDGE_IMPLEMENTATION_GUIDE.md).
+
+deviceId: pi-demo-01
+firmwareVersion: "1.0.0"
+
+esp32:
+  # Ruta estable via regla udev, no /dev/ttyUSB0 (puede cambiar al reiniciar).
+  serialPort: /dev/serial/by-id/usb-Silicon_Labs_CP2102-if00-port0
+  baudRate: 115200
+
+topics:
+  telemetry: SenseCare/v1/devices/pi-demo-01/telemetry
+  sensorAnomaly: SenseCare/v1/devices/pi-demo-01/sensor/anomaly
+  status: SenseCare/v1/devices/pi-demo-01/status
+
+iot:
+  endpoint: "<account-specific-ats-endpoint>.iot.us-east-1.amazonaws.com"
+  port: 8883
+  caPath: /etc/SenseCare/iot/AmazonRootCA1.pem
+  certificatePath: /etc/SenseCare/iot/device.pem.crt
+  privateKeyPath: /etc/SenseCare/iot/private.pem.key
+  qos: 1
+
+telemetryIntervalSeconds: 5 # perfil demo; produccion: 30-60
+heartbeatIntervalSeconds: 60
+
+sensorRules:
+  co2:
+    thresholdPpm: 1200
+    windowSeconds: 120
+    cooldownSeconds: 120
+    ruleVersion: sensor-rules-v1
+  temperature:
+    thresholdC: 38.0
+    windowSeconds: 60
+    cooldownSeconds: 120
+    ruleVersion: sensor-rules-v1

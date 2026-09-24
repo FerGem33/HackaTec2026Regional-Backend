@@ -5,6 +5,11 @@ cdk.out/
 coverage/
 *.tsbuildinfo
 
+# Python (edge/)
+.venv/
+__pycache__/
+*.pyc
+
 # Nunca versionar credenciales, certificados ni secretos
 .env
 .env.*

@@ -1,0 +1,22 @@
+[Unit]
+Description=SenseCare edge gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=SenseCare
+Group=SenseCare
+WorkingDirectory=/opt/SenseCare/edge
+Environment=SenseCare_CONFIG=/etc/SenseCare/config.yaml
+Environment=PYTHONPATH=/opt/SenseCare/edge/src
+ExecStart=/opt/SenseCare/edge/.venv/bin/python -m SenseCare_edge.main
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/SenseCare
+
+[Install]
+WantedBy=multi-user.target
