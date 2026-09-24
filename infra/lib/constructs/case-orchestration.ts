@@ -20,10 +20,24 @@ export interface CaseOrchestrationProps {
   evidenceCallbacksTable: dynamodb.ITable;
   eventLogTable: dynamodb.ITable;
   evidenceBucket: s3.IBucket;
+  observationsTable: dynamodb.ITable;
+  // Sin default: el operador debe verificar disponibilidad/acceso real del
+  // modelo (aws bedrock list-foundation-models/list-inference-profiles,
+  // solo lectura) antes de desplegar. bedrockModelId es el valor que se
+  // pasa como `modelId` a ConverseCommand (acepta tanto un modelId plano
+  // como un inference-profile id/ARN). bedrockInferenceProfileArn y
+  // bedrockFoundationModelArns son necesarios para el IAM exacto: Bedrock
+  // exige permiso tanto sobre el inference profile como sobre cada
+  // foundation model al que ese profile puede enrutar.
+  bedrockModelId: string;
+  bedrockInferenceProfileArn: string;
+  bedrockFoundationModelArns: string[];
   openCaseLockTtlSeconds?: number;
   evidenceUploadTimeoutSeconds?: number;
   evidenceCallbackTtlBufferSeconds?: number;
   evidenceWaitTimeoutSeconds?: number;
+  bedrockMaxTokens?: number;
+  bedrockTemperature?: number;
 }
 
 // Resuelto desde __dirname (no process.cwd()): estable sin importar desde
@@ -39,6 +53,7 @@ const ORCHESTRATION_ENTRY_ROOT = path.resolve(
   "src",
 );
 const EVIDENCE_ENTRY_ROOT = path.resolve(__dirname, "..", "..", "..", "services", "evidence", "src");
+const ANALYSIS_ENTRY_ROOT = path.resolve(__dirname, "..", "..", "..", "services", "analysis", "src");
 
 /**
  * Hito 4 completo: EventBridge -> Step Functions Standard por caseId,
@@ -173,6 +188,84 @@ export class CaseOrchestration extends Construct {
     props.evidenceCallbacksTable.grant(recordEvidenceOutcomeFn, "dynamodb:UpdateItem");
     props.eventLogTable.grant(recordEvidenceOutcomeFn, "dynamodb:PutItem");
 
+    // --- Task Lambdas: tramo de analisis (Bedrock Converse) ---
+    // Solo se invoca despues de evidenceStatus === "AVAILABLE" (ver Choice
+    // "EvidenceAvailable?" mas abajo). Nunca cierra ni escala el caso;
+    // unicamente produce analysisStatus (COMPLETED|UNCERTAIN), hermano de
+    // evidenceStatus, nunca un reemplazo.
+
+    const analysisFnProps = {
+      ...commonFnProps,
+      // Mas memoria/timeout que el resto de tareas: lee un JPEG de S3 y
+      // espera una respuesta de Bedrock (ver services/analysis). Mismo
+      // dimensionamiento que el "visionProcessor" propuesto en
+      // docs/ARCHITECTURE_DETAILED.md seccion 9.
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(30),
+    } satisfies Partial<lambdaNodejs.NodejsFunctionProps>;
+
+    const analyzeEvidenceFn = new lambdaNodejs.NodejsFunction(this, "AnalyzeEvidenceFn", {
+      ...analysisFnProps,
+      functionName: "SenseCare-analyzeEvidence",
+      entry: path.join(ANALYSIS_ENTRY_ROOT, "analyzeEvidenceFn.ts"),
+      environment: {
+        EVIDENCE_BUCKET_NAME: props.evidenceBucket.bucketName,
+        EVENT_LOG_TABLE_NAME: props.eventLogTable.tableName,
+        BEDROCK_MODEL_ID: props.bedrockModelId,
+        BEDROCK_MAX_TOKENS: String(props.bedrockMaxTokens ?? 400),
+        BEDROCK_TEMPERATURE: String(props.bedrockTemperature ?? 0),
+      },
+    });
+    // Solo lectura, acotada al mismo prefijo que ya usa
+    // evidenceCallbackHandlerFn; nunca el bucket completo ni s3:*.
+    analyzeEvidenceFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject"],
+        resources: [props.evidenceBucket.arnForObjects("raw-images/*")],
+      }),
+    );
+    // Bedrock exige permiso tanto sobre el inference profile como sobre
+    // cada foundation model al que puede enrutar (ver
+    // https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html).
+    // La condicion bedrock:InferenceProfileArn impide que este rol invoque
+    // los foundation models directamente, fuera del profile geografico
+    // "us." elegido (residencia/privacidad).
+    analyzeEvidenceFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["bedrock:InvokeModel"],
+        resources: [props.bedrockInferenceProfileArn],
+      }),
+    );
+    analyzeEvidenceFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["bedrock:InvokeModel"],
+        resources: props.bedrockFoundationModelArns,
+        conditions: {
+          StringEquals: { "bedrock:InferenceProfileArn": props.bedrockInferenceProfileArn },
+        },
+      }),
+    );
+    props.eventLogTable.grant(analyzeEvidenceFn, "dynamodb:PutItem");
+
+    const recordAnalysisOutcomeFn = new lambdaNodejs.NodejsFunction(this, "RecordAnalysisOutcomeFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-recordAnalysisOutcome",
+      entry: path.join(ANALYSIS_ENTRY_ROOT, "recordAnalysisOutcomeFn.ts"),
+      environment: {
+        ANOMALY_CASES_TABLE_NAME: props.anomalyCasesTable.tableName,
+        OBSERVATIONS_TABLE_NAME: props.observationsTable.tableName,
+        EVENT_LOG_TABLE_NAME: props.eventLogTable.tableName,
+        // Nunca llama a Bedrock; solo deja constancia de procedencia en
+        // Observations. Mismos valores que analyzeEvidenceFn.
+        BEDROCK_MODEL_ID: props.bedrockModelId,
+        BEDROCK_MAX_TOKENS: String(props.bedrockMaxTokens ?? 400),
+        BEDROCK_TEMPERATURE: String(props.bedrockTemperature ?? 0),
+      },
+    });
+    props.anomalyCasesTable.grant(recordAnalysisOutcomeFn, "dynamodb:UpdateItem");
+    props.observationsTable.grant(recordAnalysisOutcomeFn, "dynamodb:PutItem");
+    props.eventLogTable.grant(recordAnalysisOutcomeFn, "dynamodb:PutItem");
+
     // --- State Machine ---
     // Cada Task del tramo de registro recibe { caseDetail: $, executionArn:
     // $$.Execution.Id } y descarta su propio resultado (JsonPath.DISCARD),
@@ -251,8 +344,159 @@ export class CaseOrchestration extends Construct {
       resultPath: "$.error",
     });
 
-    const caseEvidencePhaseComplete = new sfn.Succeed(this, "CaseEvidencePhaseComplete");
-    recordOutcomeTask.next(caseEvidencePhaseComplete);
+    // --- Tramo de analisis (Bedrock) ---
+
+    const caseAnalysisPhaseComplete = new sfn.Succeed(this, "CaseAnalysisPhaseComplete");
+
+    const analysisRecordingFailed = new sfn.Fail(this, "AnalysisOutcomeRecordingFailed", {
+      error: "AnalysisOutcomeRecordingFailed",
+      cause: "No se pudo registrar el resultado de analisis; revisar CloudWatch Logs y EventLog.",
+    });
+
+    const recordAnalysisOutcomeTask = new tasks.LambdaInvoke(this, "RecordAnalysisOutcome", {
+      lambdaFunction: recordAnalysisOutcomeFn,
+      // "$" ya tiene, en cada rama, exactamente la forma que
+      // recordAnalysisOutcomeFn espera (ver PrepareAnalysisOutcome y los
+      // MapToAnalysisUncertain* abajo): analysisStatus siempre presente,
+      // observation/failureReason siempre presentes (aunque sea null), asi
+      // que ninguna rama referencia una ruta ausente.
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+      retryOnServiceExceptions: true,
+    });
+    recordAnalysisOutcomeTask.addCatch(analysisRecordingFailed, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.error",
+    });
+    recordAnalysisOutcomeTask.next(caseAnalysisPhaseComplete);
+
+    const prepareAnalysisOutcome = new sfn.Pass(this, "PrepareAnalysisOutcome", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        "evidenceS3Key.$": "$.evidenceS3Key",
+        "evidenceImageId.$": "$.evidenceImageId",
+        "analysisStatus.$": "$.analysisResult.analysisStatus",
+        "observation.$": "$.analysisResult.observation",
+        "failureReason.$": "$.analysisResult.failureReason",
+      },
+    });
+    prepareAnalysisOutcome.next(recordAnalysisOutcomeTask);
+
+    // Los 4 destinos de Catch de AnalyzeEvidence usan un failureReason FIJO
+    // (nunca $.analysisError.Error): mismo principio de seguridad que
+    // MapToError en el tramo de evidencia, nunca propagar texto de
+    // excepcion tecnica sin controlar hacia AnomalyCases/EventLog.
+    // evidenceS3Key/evidenceImageId siguen presentes en "$" desde
+    // MapToAvailable (AnalyzeEvidence nunca los toca ni los descarta), asi
+    // que tambien se propagan aqui para que la auditoria de un resultado
+    // incierto siga sabiendo a que imagen se referia. Sin `observation:
+    // null` explicito: sfn.Pass omite por completo las claves con valor
+    // literal null al sintetizar, asi que la clave sencillamente no existe
+    // en $ para estas 4 ramas; recordAnalysisOutcomeFn.ts solo lee
+    // `observation` dentro de la rama analysisStatus==="COMPLETED", asi que
+    // su ausencia aqui es inocua.
+    const mapToAnalysisUncertainThrottled = new sfn.Pass(this, "MapToAnalysisUncertainThrottled", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        "evidenceS3Key.$": "$.evidenceS3Key",
+        "evidenceImageId.$": "$.evidenceImageId",
+        analysisStatus: "UNCERTAIN",
+        failureReason: "THROTTLED",
+      },
+    });
+    mapToAnalysisUncertainThrottled.next(recordAnalysisOutcomeTask);
+
+    const mapToAnalysisUncertainTimeout = new sfn.Pass(this, "MapToAnalysisUncertainTimeout", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        "evidenceS3Key.$": "$.evidenceS3Key",
+        "evidenceImageId.$": "$.evidenceImageId",
+        analysisStatus: "UNCERTAIN",
+        failureReason: "MODEL_TIMEOUT",
+      },
+    });
+    mapToAnalysisUncertainTimeout.next(recordAnalysisOutcomeTask);
+
+    const mapToAnalysisUncertainUnavailable = new sfn.Pass(this, "MapToAnalysisUncertainUnavailable", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        "evidenceS3Key.$": "$.evidenceS3Key",
+        "evidenceImageId.$": "$.evidenceImageId",
+        analysisStatus: "UNCERTAIN",
+        failureReason: "MODEL_UNAVAILABLE",
+      },
+    });
+    mapToAnalysisUncertainUnavailable.next(recordAnalysisOutcomeTask);
+
+    const mapToAnalysisUncertainInternal = new sfn.Pass(this, "MapToAnalysisUncertainInternal", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        "evidenceS3Key.$": "$.evidenceS3Key",
+        "evidenceImageId.$": "$.evidenceImageId",
+        analysisStatus: "UNCERTAIN",
+        failureReason: "INTERNAL_ERROR",
+      },
+    });
+    mapToAnalysisUncertainInternal.next(recordAnalysisOutcomeTask);
+
+    const analyzeEvidenceTask = new tasks.LambdaInvoke(this, "AnalyzeEvidence", {
+      lambdaFunction: analyzeEvidenceFn,
+      payload: sfn.TaskInput.fromObject({
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        "evidenceS3Key.$": "$.evidenceS3Key",
+        "evidenceImageId.$": "$.evidenceImageId",
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.analysisResult",
+      retryOnServiceExceptions: true,
+    });
+    // Solo se reintenta la invocacion completa (relee S3, vuelve a llamar
+    // Bedrock) para errores transitorios de Bedrock. ValidationException/
+    // AccessDeniedException/ResourceNotFoundException y la validacion de
+    // schema de la observacion se atrapan DENTRO del Lambda (ver
+    // services/analysis/src/analyzeEvidenceFn.ts) y jamas llegan aqui como
+    // excepcion: nunca se reintentan.
+    analyzeEvidenceTask.addRetry({
+      errors: [
+        "ThrottlingException",
+        "ModelTimeoutException",
+        "ServiceUnavailableException",
+        "InternalServerException",
+        "ModelErrorException",
+      ],
+      interval: cdk.Duration.seconds(2),
+      backoffRate: 2,
+      maxAttempts: 3,
+    });
+    analyzeEvidenceTask.addCatch(mapToAnalysisUncertainThrottled, {
+      errors: ["ThrottlingException"],
+      resultPath: "$.analysisError",
+    });
+    analyzeEvidenceTask.addCatch(mapToAnalysisUncertainTimeout, {
+      errors: ["ModelTimeoutException"],
+      resultPath: "$.analysisError",
+    });
+    analyzeEvidenceTask.addCatch(mapToAnalysisUncertainUnavailable, {
+      errors: ["ServiceUnavailableException", "InternalServerException", "ModelErrorException"],
+      resultPath: "$.analysisError",
+    });
+    analyzeEvidenceTask.addCatch(mapToAnalysisUncertainInternal, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.analysisError",
+    });
+    analyzeEvidenceTask.next(prepareAnalysisOutcome);
+
+    const evidenceAvailableChoice = new sfn.Choice(this, "EvidenceAvailable?")
+      .when(sfn.Condition.stringEquals("$.evidenceStatus", "AVAILABLE"), analyzeEvidenceTask)
+      .otherwise(caseAnalysisPhaseComplete);
+
+    recordOutcomeTask.next(evidenceAvailableChoice);
 
     const mapToSkippedNoConsent = new sfn.Pass(this, "MapToSkippedNoConsent", {
       parameters: {

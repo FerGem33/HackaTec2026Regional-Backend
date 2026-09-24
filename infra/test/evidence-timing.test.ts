@@ -8,6 +8,14 @@ import { EvidenceCallbackQueues } from "../lib/constructs/evidence-callback-queu
 import { EvidenceCallbackHandlers } from "../lib/constructs/evidence-callback-handlers.js";
 import { CaseOrchestration } from "../lib/constructs/case-orchestration.js";
 
+// Valores ficticios explicitos para pruebas (ver case-orchestration.test.ts).
+const TEST_BEDROCK_MODEL_ID = "us.amazon.nova-lite-v1:0";
+const TEST_BEDROCK_INFERENCE_PROFILE_ARN =
+  "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-lite-v1:0";
+const TEST_BEDROCK_FOUNDATION_MODEL_ARNS = [
+  "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0",
+];
+
 interface AslState {
   Type: string;
   TimeoutSeconds?: number;
@@ -58,6 +66,10 @@ function synth(): Template {
     partitionKey: { name: "deviceId", type: dynamodb.AttributeType.STRING },
   });
   const evidenceBucket = new s3.Bucket(stack, "EvidenceBucket");
+  const observationsTable = new dynamodb.Table(stack, "ObservationsTable", {
+    partitionKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "imageId", type: dynamodb.AttributeType.STRING },
+  });
   const eventBus = new events.EventBus(stack, "Bus", { eventBusName: "SenseCare" });
 
   const queues = new EvidenceCallbackQueues(stack, "Queues");
@@ -76,6 +88,10 @@ function synth(): Template {
     evidenceCallbacksTable,
     eventLogTable,
     evidenceBucket,
+    observationsTable,
+    bedrockModelId: TEST_BEDROCK_MODEL_ID,
+    bedrockInferenceProfileArn: TEST_BEDROCK_INFERENCE_PROFILE_ARN,
+    bedrockFoundationModelArns: TEST_BEDROCK_FOUNDATION_MODEL_ARNS,
   });
 
   return Template.fromStack(stack);
