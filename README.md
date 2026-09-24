@@ -96,6 +96,7 @@ Fuera de alcance:
 - [Cotización AWS reproducible](docs/AWS_COST_ESTIMATE.md)
 - [Roadmap de implementación y despliegue](docs/IMPLEMENTATION_ROADMAP.md)
 - [Guía de implementación edge: Raspberry Pi 4B + ESP32](docs/EDGE_IMPLEMENTATION_GUIDE.md)
+- [Aprovisionamiento de dispositivo y prueba de humo MQTT](docs/DEVICE_PROVISIONING_AND_SMOKE_TEST.md)
 - [Configuración de subagentes para Claude Code](docs/CLAUDE_MULTIAGENT_SETUP.md)
 - [Guía de desarrollo del monorepo (contratos, pruebas, simulador)](docs/DEVELOPMENT.md)
 - [Guía de integración del simulador de demo](docs/SIMULATOR_INTEGRATION_GUIDE.md)

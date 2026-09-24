@@ -134,10 +134,14 @@ Desde la consola de AWS IoT Core → MQTT test client:
    - una ejecución **nueva** en la consola de Step Functions, con nombre
      igual al `caseId` generado,
    - una entrada nueva en `AnomalyCases` con `status: "DETECTED"`.
-4. Publicar la **misma** anomalía otra vez (mismo `recipientId` +
-   `anomalyType`) → confirmar que **no** aparece una segunda ejecución de
-   Step Functions (mismo nombre, duplicado absorbido) y que
-   `AnomalyCases.updatedAt` se refresca sin cambiar `createdAt`.
+4. Probar ambos tipos de repetición:
+   - Publicar exactamente el mismo payload otra vez (mismo `eventId`) → es
+     una reentrega; no debe aparecer una segunda ejecución ni un nuevo
+     registro de evento.
+   - Publicar una nueva detección con un `eventId` nuevo, pero para el mismo
+     `deviceId` y tipo de anomalía → debe quedar registrada en `EventLog`,
+     pero mientras el candado esté abierto no debe crearse otra ejecución de
+     Step Functions ni otro `AnomalyCase`.
 
 Sólo después de que esta prueba complete sin intervención manual adicional,
 continuar al paso 6.
