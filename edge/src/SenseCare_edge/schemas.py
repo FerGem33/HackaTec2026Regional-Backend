@@ -24,6 +24,10 @@ def _load_validator(filename: str) -> Draft202012Validator:
 
 _telemetry_validator = _load_validator("telemetry.schema.json")
 _sensor_anomaly_validator = _load_validator("sensorAnomaly.schema.json")
+_visual_anomaly_validator = _load_validator("visualAnomaly.schema.json")
+_upload_evidence_command_validator = _load_validator("uploadEvidenceCommand.schema.json")
+_command_ack_validator = _load_validator("commandAck.schema.json")
+_evidence_result_validator = _load_validator("evidenceResult.schema.json")
 
 
 class SchemaValidationError(ValueError):
@@ -43,3 +47,27 @@ def validate_sensor_anomaly(payload: dict) -> None:
     errors = sorted(_sensor_anomaly_validator.iter_errors(payload), key=lambda e: e.path)
     if errors:
         raise SchemaValidationError("sensorAnomaly", [e.message for e in errors])
+
+
+def validate_visual_anomaly(payload: dict) -> None:
+    errors = sorted(_visual_anomaly_validator.iter_errors(payload), key=lambda e: e.path)
+    if errors:
+        raise SchemaValidationError("visualAnomaly", [e.message for e in errors])
+
+
+def validate_upload_evidence_command(payload: dict) -> None:
+    errors = sorted(_upload_evidence_command_validator.iter_errors(payload), key=lambda e: e.path)
+    if errors:
+        raise SchemaValidationError("uploadEvidenceCommand", [e.message for e in errors])
+
+
+def validate_command_ack(payload: dict) -> None:
+    errors = sorted(_command_ack_validator.iter_errors(payload), key=lambda e: e.path)
+    if errors:
+        raise SchemaValidationError("commandAck", [e.message for e in errors])
+
+
+def validate_evidence_result(payload: dict) -> None:
+    errors = sorted(_evidence_result_validator.iter_errors(payload), key=lambda e: e.path)
+    if errors:
+        raise SchemaValidationError("evidenceResult", [e.message for e in errors])

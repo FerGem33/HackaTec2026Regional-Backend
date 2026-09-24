@@ -19,6 +19,18 @@ REQUIRED_PATHS = (
     ("iot", "privateKeyPath"),
 )
 
+# Solo se exigen si el bloque `vision` esta presente en config.yaml: la
+# vision es un subsistema opcional (requiere camara fisica todavia sin
+# decidir), a diferencia de los campos de REQUIRED_PATHS.
+VISION_REQUIRED_PATHS = (
+    ("vision", "poseModelPath"),
+    ("vision", "personModelPath"),
+    ("topics", "visualAnomaly"),
+    ("topics", "commands"),
+    ("topics", "commandAcks"),
+    ("topics", "evidence"),
+)
+
 
 def _get(config: dict, path: tuple[str, ...]):
     node = config
@@ -77,6 +89,38 @@ class EdgeConfig:
     def sensor_rules(self) -> dict:
         return self.raw.get("sensorRules", {})
 
+    @property
+    def vision_enabled(self) -> bool:
+        return bool(self.raw.get("vision"))
+
+    @property
+    def camera_config(self) -> dict:
+        return self.raw.get("camera", {})
+
+    @property
+    def vision_config(self) -> dict:
+        return self.raw.get("vision", {})
+
+    @property
+    def risk_fusion_config(self) -> dict:
+        return self.raw.get("riskFusion", {})
+
+    @property
+    def topic_visual_anomaly(self) -> str | None:
+        return self.raw["topics"].get("visualAnomaly")
+
+    @property
+    def topic_commands(self) -> str | None:
+        return self.raw["topics"].get("commands")
+
+    @property
+    def topic_command_acks(self) -> str | None:
+        return self.raw["topics"].get("commandAcks")
+
+    @property
+    def topic_evidence(self) -> str | None:
+        return self.raw["topics"].get("evidence")
+
 
 def load_config(path: str | None = None) -> EdgeConfig:
     """Carga y valida config.yaml. Falla rapido (exit 1) si falta algo critico,
@@ -94,6 +138,15 @@ def load_config(path: str | None = None) -> EdgeConfig:
     if missing:
         print(f"[config] faltan campos obligatorios: {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
+
+    if raw.get("vision"):
+        missing_vision = [".".join(p) for p in VISION_REQUIRED_PATHS if _get(raw, p) is None]
+        if missing_vision:
+            print(
+                f"[config] bloque 'vision' presente pero incompleto: {', '.join(missing_vision)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     for cert_key in ("caPath", "certificatePath", "privateKeyPath"):
         cert_path = raw["iot"][cert_key]

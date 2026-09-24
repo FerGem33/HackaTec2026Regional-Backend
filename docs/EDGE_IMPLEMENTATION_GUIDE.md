@@ -393,6 +393,22 @@ Al recibirlo, `commands.py` debe:
 
 El `COMMAND_ACK` se publica en `command-acks`; el resultado final en `evidence`. Ambos incluyen `caseId` y su propio `eventId`.
 
+> **Limitación de implementación (demo, no de contrato):** `UPLOAD_EVIDENCE`
+> no lleva el `eventId` de la `VISUAL_ANOMALY` que originó el caso, solo
+> `caseId`. Sin ese campo, la Pi no puede correlacionar por el cable a cuál
+> anomalia visual específica corresponde una orden `BUFFERED` si hubiera más
+> de una pendiente a la vez. La implementación actual de referencia
+> (`edge/src/SenseCare_edge/commands.py`) resuelve esto admitiendo **como
+> máximo una** anomalía visual con evidencia `BUFFERED` pendiente por
+> dispositivo: mientras esa reserva esté vigente, cualquier otra anomalía
+> visual se suprime (no se publica) en vez de arriesgar una correlación
+> incorrecta, y se libera sola tras un TTL si nadie la reclama. Esto es
+> aceptable para el alcance actual del demo (una anomalía → un caso → una
+> orden de evidencia, en ese orden). Agregar un campo de correlación
+> explícito al contrato (por ejemplo `eventId` en `UPLOAD_EVIDENCE`) requiere
+> propuesta y aprobación del coordinador antes de implementarse; no se ha
+> hecho aquí.
+
 ### Reintentos y reenvío de `UPLOAD_EVIDENCE` con el mismo `commandId`
 
 El backend puede reenviar el **mismo** `UPLOAD_EVIDENCE` (mismo `commandId`)
