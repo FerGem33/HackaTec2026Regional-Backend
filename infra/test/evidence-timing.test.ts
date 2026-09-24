@@ -2,6 +2,7 @@ import { App, Stack } from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as kms from "aws-cdk-lib/aws-kms";
 import * as events from "aws-cdk-lib/aws-events";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -86,6 +87,11 @@ function synth(): Template {
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
   const alertsTopic = new sns.Topic(stack, "AlertsTopic");
+  const caseActionCallbacksTable = new dynamodb.Table(stack, "CaseActionCallbacksTable", {
+    partitionKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "callbackType", type: dynamodb.AttributeType.STRING },
+  });
+  const fallbackCallCmk = new kms.Key(stack, "FallbackCallDestinationKey");
 
   const queues = new EvidenceCallbackQueues(stack, "Queues");
   new EvidenceCallbackHandlers(stack, "Handlers", {
@@ -110,6 +116,15 @@ function synth(): Template {
     alertsTable,
     caregiverAccessTable,
     alertsTopic,
+    caseActionCallbacksTable,
+    fallbackCallCmk,
+    fallbackCallDestinationParameterName: "/sensecare/demo/fallback-call-destination-test",
+    fallbackCallDestinationParameterArn:
+      "arn:aws:ssm:us-east-1:123456789012:parameter/sensecare/demo/fallback-call-destination-test",
+    connectInstanceId: "11111111-1111-1111-1111-111111111111",
+    connectContactFlowId: "22222222-2222-2222-2222-222222222222",
+    connectSourcePhoneNumber: "+10000000000",
+    escalationAllowedDeviceIds: ["pi-demo-01", "sim-room-01"],
   });
 
   return Template.fromStack(stack);

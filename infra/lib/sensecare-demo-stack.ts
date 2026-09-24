@@ -25,6 +25,8 @@ import { AlertsTable } from "./constructs/alerts-table";
 import { AlertsTopic } from "./constructs/alerts-topic";
 import { CasesApi } from "./constructs/cases-api";
 import { DlqAlarms } from "./constructs/dlq-alarms";
+import { CaseActionCallbacksTable } from "./constructs/case-action-callbacks-table";
+import { FallbackCallSecret } from "./constructs/fallback-call-secret";
 
 export interface SenseCareDemoStackProps extends cdk.StackProps {
   // Requeridos, sin default: deben venir de una verificacion manual de
@@ -39,6 +41,23 @@ export interface SenseCareDemoStackProps extends cdk.StackProps {
   // el deploy (ver runbook de alertas).
   alertSubscriptionEmails?: string[];
   operationalSubscriptionEmails?: string[];
+  // --- Hito de escalamiento --- Sin default para ninguno de los 3
+  // valores de Connect: instancia, contact flow y numero de origen se
+  // reclaman a mano antes del deploy (ver docs/EMERGENCY_CALL_RUNBOOK.md).
+  connectInstanceId: string;
+  connectContactFlowId: string;
+  connectSourcePhoneNumber: string;
+  // Nombre (no el valor) del parametro SSM SecureString del numero de
+  // fallback de demo. El valor real se fija a mano DESPUES del deploy.
+  fallbackCallDestinationParameterName: string;
+  // Allowlist propia de escalamiento (deviceId de demo), nunca el numero
+  // real. Por defecto solo el dispositivo fisico y el simulador de demo.
+  escalationAllowedDeviceIds?: string[];
+  // Gate global explicito: por defecto false (bloquea SIEMPRE el camino
+  // automatico de llamada hasta que el operador confirme un canal humano
+  // de notificacion real -- ver docs/ALERTS_AND_CASE_ACTIONS_RUNBOOK.md).
+  humanNotificationChannelConfirmed?: boolean;
+  humanDecisionWaitSeconds?: number;
 }
 
 /**
@@ -53,12 +72,15 @@ export interface SenseCareDemoStackProps extends cdk.StackProps {
  * critico, sin esperar evidencia ni Bedrock; red de seguridad al final del
  * tramo de evidencia/analisis para el resto -- y las acciones humanas
  * autenticadas CANCEL_ALERT/ESCALATE, ver CasesApi; alarma DLQ -> SNS
- * operativa via DlqAlarms). Sin Amazon Connect, telefonia, frontend,
- * check-in de voz/audio, Bedrock Agents ni herramientas autonomas todavia
- * (ver docs/IMPLEMENTATION_ROADMAP.md): ESCALATE solo registra la intencion
- * humana, no dispara ninguna llamada. No instancia Thing ni certificado
- * X.509 (aprovisionamiento por dispositivo, fuera de CDK a proposito: ver
- * runbook de pre-despliegue).
+ * operativa via DlqAlarms) + hito de escalamiento (espera de decision
+ * humana con callback de Step Functions -> EscalationPolicy determinista
+ * -> EmergencyDialer, la unica Lambda con connect:StartOutboundVoiceContact,
+ * hacia un unico numero demo en SSM SecureString). Sin frontend, check-in
+ * de voz/audio, Bedrock Agents ni herramientas autonomas todavia (ver
+ * docs/IMPLEMENTATION_ROADMAP.md). No instancia Thing ni certificado X.509,
+ * ni la instancia Connect/contact flow/numero reclamado (aprovisionamiento
+ * manual fuera de CDK a proposito: ver runbook de pre-despliegue y
+ * docs/EMERGENCY_CALL_RUNBOOK.md).
  */
 export class SenseCareDemoStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: SenseCareDemoStackProps) {
@@ -120,6 +142,15 @@ export class SenseCareDemoStack extends cdk.Stack {
       operationalSubscriptionEmails: props.operationalSubscriptionEmails,
     });
 
+    // Hito de escalamiento: tabla efimera del taskToken de decision humana
+    // y la CMK/ARN del parametro SSM del numero de fallback (nunca el
+    // valor: eso se fija a mano despues del deploy, ver
+    // docs/EMERGENCY_CALL_RUNBOOK.md).
+    const caseActionCallbacks = new CaseActionCallbacksTable(this, "CaseActionCallbacksTable");
+    const fallbackCallSecret = new FallbackCallSecret(this, "FallbackCallSecret", {
+      parameterName: props.fallbackCallDestinationParameterName,
+    });
+
     const caseOrchestration = new CaseOrchestration(this, "CaseOrchestration", {
       eventBus,
       openCaseLocksTable: tables.openCaseLocksTable,
@@ -135,6 +166,16 @@ export class SenseCareDemoStack extends cdk.Stack {
       alertsTable: alerts.table,
       caregiverAccessTable: caregiverAccess.table,
       alertsTopic: alertsTopic.alertsTopic,
+      caseActionCallbacksTable: caseActionCallbacks.table,
+      fallbackCallCmk: fallbackCallSecret.cmk,
+      fallbackCallDestinationParameterName: fallbackCallSecret.parameterName,
+      fallbackCallDestinationParameterArn: fallbackCallSecret.parameterArn,
+      connectInstanceId: props.connectInstanceId,
+      connectContactFlowId: props.connectContactFlowId,
+      connectSourcePhoneNumber: props.connectSourcePhoneNumber,
+      escalationAllowedDeviceIds: props.escalationAllowedDeviceIds ?? ["pi-demo-01", "sim-room-01"],
+      humanNotificationChannelConfirmed: props.humanNotificationChannelConfirmed,
+      humanDecisionWaitSeconds: props.humanDecisionWaitSeconds,
     });
 
     new DlqAlarms(this, "DlqAlarms", {
@@ -216,10 +257,17 @@ export class SenseCareDemoStack extends cdk.Stack {
     // UPLOAD_EVIDENCE con URL prefirmada, callbacks MQTT y reconciliacion)
     // ya esta implementado en CaseOrchestration.
 
-    // TODO(Hito de telefonia, posterior y separado): Amazon Connect Customer
-    // (Voice) via EscalationPolicy/EmergencyDialer, destino unicamente en
-    // allowlist de demo, nunca 911. ESCALATE (arriba) todavia solo registra
-    // la intencion humana; no dispara ninguna llamada. Alertas SNS + alarma
-    // DLQ -> SNS ya implementadas (AlertsTopic, DlqAlarms).
+    // Hito de escalamiento (implementado en CaseOrchestration): espera de
+    // CANCEL_ALERT/ESCALATE con callback de Step Functions ->
+    // EscalationPolicy determinista -> EmergencyDialer (unica Lambda con
+    // connect:StartOutboundVoiceContact). Pendiente, manual y fuera de CDK
+    // a proposito: reclamar la instancia Connect/contact flow/numero de
+    // origen, y fijar el VALOR del parametro SSM
+    // `fallbackCallDestinationParameterName` con
+    // `aws ssm put-parameter --type SecureString` (ver
+    // docs/EMERGENCY_CALL_RUNBOOK.md). Sin ese valor, EmergencyDialer
+    // fallaria con DIAL_FAILED de forma segura (nunca marca sin destino).
+    // `humanNotificationChannelConfirmed` queda en `false` hasta que el
+    // operador confirme un canal humano de notificacion real.
   }
 }
