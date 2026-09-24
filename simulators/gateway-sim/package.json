@@ -1,0 +1,16 @@
+{
+  "name": "@sensecare/gateway-sim",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Simulador local de gateway/Pi: genera telemetria y anomalias de sensor validas contra @sensecare/contracts. No abre conexiones de red ni publica a AWS IoT Core.",
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@sensecare/contracts": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.1"
+  }
+}

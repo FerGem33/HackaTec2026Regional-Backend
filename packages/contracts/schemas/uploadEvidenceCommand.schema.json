@@ -1,0 +1,41 @@
+{
+  "$id": "sensecare/uploadEvidenceCommand.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SenseCare Upload Evidence Command",
+  "type": "object",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$",
+      "format": "date-time"
+    }
+  },
+  "properties": {
+    "commandId": { "$ref": "#/$defs/uuid" },
+    "caseId": { "$ref": "#/$defs/uuid" },
+    "command": { "const": "UPLOAD_EVIDENCE" },
+    "reason": { "type": "string", "enum": ["LOCAL_VISUAL_ANOMALY", "SENSOR_ANOMALY"] },
+    "captureMode": { "type": "string", "enum": ["BUFFERED", "CURRENT"] },
+    "s3Key": {
+      "type": "string",
+      "pattern": "^raw-images/[a-z0-9-]{1,64}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\\.jpg$"
+    },
+    "uploadUrl": { "type": "string", "pattern": "^https://", "minLength": 10 },
+    "expiresAt": { "$ref": "#/$defs/utcTimestamp" }
+  },
+  "required": [
+    "commandId",
+    "caseId",
+    "command",
+    "reason",
+    "captureMode",
+    "s3Key",
+    "uploadUrl",
+    "expiresAt"
+  ],
+  "additionalProperties": false
+}

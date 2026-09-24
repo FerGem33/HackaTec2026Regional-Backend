@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+cdk.out/
+coverage/
+*.tsbuildinfo
+
+# Nunca versionar credenciales, certificados ni secretos
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+
+*.log
+.DS_Store

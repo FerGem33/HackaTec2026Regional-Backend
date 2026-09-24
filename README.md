@@ -97,7 +97,8 @@ Fuera de alcance:
 - [Roadmap de implementación y despliegue](docs/IMPLEMENTATION_ROADMAP.md)
 - [Guía de implementación edge: Raspberry Pi 4B + ESP32](docs/EDGE_IMPLEMENTATION_GUIDE.md)
 - [Configuración de subagentes para Claude Code](docs/CLAUDE_MULTIAGENT_SETUP.md)
+- [Guía de desarrollo del monorepo (contratos, pruebas, simulador)](docs/DEVELOPMENT.md)
 
 ## Estado
 
-Arquitectura definida; la implementación de infraestructura, servicios backend y aplicación está pendiente.
+Arquitectura definida. Primera ola en desarrollo: contratos compartidos (`packages/contracts`), simulador local de gateway (`simulators/gateway-sim`) y esqueleto de infraestructura CDK (`infra/`, sin recursos ni despliegue). El resto de servicios backend, la integración edge real y la aplicación siguen pendientes.

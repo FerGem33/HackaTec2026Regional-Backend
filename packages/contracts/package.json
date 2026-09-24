@@ -1,0 +1,16 @@
+{
+  "name": "@sensecare/contracts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Contratos JSON Schema y validadores Ajv compartidos para eventos SenseCare (edge <-> backend).",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schemas/*": "./schemas/*"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1"
+  }
+}

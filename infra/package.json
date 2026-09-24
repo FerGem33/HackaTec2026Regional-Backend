@@ -1,0 +1,19 @@
+{
+  "name": "@sensecare/infra",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Esqueleto CDK de SenseCareDemoStack. No instancia recursos AWS todavia; no ejecutar synth/deploy con intencion de aprovisionar sin aprobacion explicita.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.161.1",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.161.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3",
+    "@types/node": "^22.7.5"
+  }
+}

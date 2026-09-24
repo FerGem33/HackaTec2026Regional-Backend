@@ -1,0 +1,100 @@
+{
+  "$id": "sensecare/visualAnomaly.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SenseCare Visual Anomaly",
+  "type": "object",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$"
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$",
+      "format": "date-time"
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "riskCandidate": {
+      "type": "string",
+      "enum": [
+        "POSSIBLE_FALL",
+        "POSSIBLE_UNCONSCIOUSNESS",
+        "PERSON_PRONE_INACTIVE",
+        "UNEXPECTED_PERSON",
+        "POSSIBLE_SMOKE_OR_FIRE",
+        "CAMERA_TAMPERED"
+      ]
+    }
+  },
+  "properties": {
+    "eventId": { "$ref": "#/$defs/uuid" },
+    "eventType": { "const": "VISUAL_ANOMALY" },
+    "deviceId": { "$ref": "#/$defs/deviceId" },
+    "occurredAt": { "$ref": "#/$defs/utcTimestamp" },
+    "anomalyType": {
+      "type": "string",
+      "enum": [
+        "POSSIBLE_FALL",
+        "PERSON_PRONE_INACTIVE",
+        "UNEXPECTED_PERSON",
+        "POSSIBLE_SMOKE_OR_FIRE",
+        "CAMERA_TAMPERED"
+      ]
+    },
+    "confidence": { "$ref": "#/$defs/confidence" },
+    "candidates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/riskCandidate" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "evidence": {
+      "type": "object",
+      "properties": {
+        "personCount": { "type": "integer", "minimum": 0 },
+        "zone": { "type": "string", "minLength": 1 },
+        "posture": { "type": "string", "enum": ["standing", "lying_or_fallen", "unknown"] },
+        "horizontalSeconds": { "type": "number", "minimum": 0 },
+        "motionAfterSeconds": { "type": "number", "minimum": 0 }
+      },
+      "required": ["personCount", "zone"],
+      "additionalProperties": false
+    },
+    "modelVersions": {
+      "type": "object",
+      "properties": {
+        "pose": { "type": "string", "minLength": 1 },
+        "person": { "type": "string", "minLength": 1 },
+        "smokeFire": { "type": "string", "minLength": 1 }
+      },
+      "required": ["pose", "person"],
+      "additionalProperties": false
+    },
+    "sensors": {
+      "type": "object",
+      "properties": {
+        "temperatureC": { "type": "number" },
+        "co2Ppm": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "eventId",
+    "eventType",
+    "deviceId",
+    "occurredAt",
+    "anomalyType",
+    "confidence",
+    "candidates",
+    "evidence",
+    "modelVersions"
+  ],
+  "additionalProperties": false
+}
