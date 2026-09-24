@@ -39,7 +39,14 @@ beforeEach(() => {
     .on(GetCommand, { TableName: process.env.DEVICES_TABLE_NAME })
     .resolves({ Item: { lastSeenAt: "2026-09-24T18:30:00Z" } });
   ddbMock.on(QueryCommand).resolves({
-    Items: [{ deviceId: "pi-demo-01", temperatureC: 27.3, occurredAtEventId: "2026-09-24T18:30:00Z#e1" }],
+    Items: [
+      {
+        deviceId: "pi-demo-01",
+        temperatureC: 27.3,
+        occurredAtEventId: "2026-09-24T18:30:00Z#e1",
+        receivedAt: "2026-09-24T18:30:01.000Z",
+      },
+    ],
   });
 });
 

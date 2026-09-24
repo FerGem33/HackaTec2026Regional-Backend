@@ -5,10 +5,31 @@ import { queryConfig } from "./queryConfig.js";
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 100;
 
+// Cuantos items recientes (ordenados por occurredAt) se traen para elegir el
+// "mas reciente de verdad" por receivedAt -- ver comentario en getDeviceLatest.
+const LATEST_CANDIDATE_WINDOW = 20;
+
 export interface DeviceLatestResult {
   deviceId: string;
   lastSeenAt: string | null;
   latestTelemetry: Record<string, unknown> | null;
+}
+
+/**
+ * De entre los items recibidos, el de mayor `receivedAt` (asignado por el
+ * backend al escribir, ver telemetryIngestHandler.ts: `receivedAt: new
+ * Date().toISOString()`). Un item sin `receivedAt` nunca gana.
+ */
+function pickMostRecentlyReceived(
+  items: Record<string, unknown>[] | undefined,
+): Record<string, unknown> | null {
+  if (!items || items.length === 0) return null;
+  return items.reduce((latest, item) => {
+    const candidate = item.receivedAt as string | undefined;
+    if (!candidate) return latest;
+    const current = latest?.receivedAt as string | undefined;
+    return !current || candidate > current ? item : latest;
+  }, null as Record<string, unknown> | null);
 }
 
 /**
@@ -19,6 +40,18 @@ export interface DeviceLatestResult {
  * mismo API). Autorizacion es unicamente "JWT valido" (API Gateway ya lo
  * exige antes de invocar este Lambda); no hay CaregiverAccess todavia (ver
  * TODO en sensecare-demo-stack.ts).
+ *
+ * "Mas reciente" se decide por `receivedAt` (server-side), NO por
+ * `occurredAt` (lo reporta el propio dispositivo/cliente, sin validar).
+ * Un solo item con un `occurredAt` inventado o incorrecto -- por ejemplo el
+ * payload de ejemplo de docs/DEVICE_PROVISIONING_AND_SMOKE_TEST.md, que usa
+ * "occurredAt": "...T23:00:00Z" como prueba de humo -- ordenaria SIEMPRE
+ * despues de lecturas reales mas tempranas ese mismo dia si solo se mirara
+ * `occurredAtEventId` (el sort key de la tabla), aunque hayan llegado horas
+ * antes. Por eso se traen los ultimos LATEST_CANDIDATE_WINDOW items por
+ * occurredAt descendente y se elige entre ellos por receivedAt: barato (una
+ * sola Query, sin GSI nuevo) y suficiente para que un item viejo con fecha
+ * fabricada no eclipse datos reales recien llegados.
  */
 export async function getDeviceLatest(deviceId: string): Promise<DeviceLatestResult> {
   const [deviceResult, telemetryResult] = await Promise.all([
@@ -35,7 +68,7 @@ export async function getDeviceLatest(deviceId: string): Promise<DeviceLatestRes
         KeyConditionExpression: "deviceId = :deviceId",
         ExpressionAttributeValues: { ":deviceId": deviceId },
         ScanIndexForward: false,
-        Limit: 1,
+        Limit: LATEST_CANDIDATE_WINDOW,
       }),
     ),
   ]);
@@ -43,7 +76,7 @@ export async function getDeviceLatest(deviceId: string): Promise<DeviceLatestRes
   return {
     deviceId,
     lastSeenAt: (deviceResult.Item?.lastSeenAt as string | undefined) ?? null,
-    latestTelemetry: telemetryResult.Items?.[0] ?? null,
+    latestTelemetry: pickMostRecentlyReceived(telemetryResult.Items),
   };
 }
 
