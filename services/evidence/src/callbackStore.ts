@@ -55,7 +55,13 @@ export type PrepareCommandResult =
       s3Key: string;
       commandExpiresAt: string;
     }
-  | { action: "RESOLVE_IMMEDIATELY"; outcomeType: ResolvedOutcomeType; reason?: string }
+  | {
+      action: "RESOLVE_IMMEDIATELY";
+      outcomeType: ResolvedOutcomeType;
+      reason?: string;
+      s3Key: string;
+      imageId: string;
+    }
   | { action: "NOOP" };
 
 /**
@@ -180,6 +186,13 @@ export async function prepareUploadCommand(
       action: "RESOLVE_IMMEDIATELY",
       outcomeType: existing.resolvedOutcomeType ?? "TIMEOUT",
       reason: existing.resolvedReason,
+      // Necesarios para que un exito tardio (UPLOADED) pueda reconstruir el
+      // mismo output que produce el camino normal de callback (ver
+      // requestEvidenceUploadFn.ts): la Task de Step Functions que mapea a
+      // AVAILABLE lee $.evidenceUploadResult.s3Key/imageId sin importar por
+      // cual de los dos caminos se resolvio.
+      s3Key: existing.expectedS3Key,
+      imageId: existing.imageId,
     };
   }
 

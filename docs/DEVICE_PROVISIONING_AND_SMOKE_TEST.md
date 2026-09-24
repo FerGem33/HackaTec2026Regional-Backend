@@ -28,6 +28,13 @@ Antes de aceptar telemetría, el backend busca el `recipientId` a partir del
 `deviceId` en `SenseCare-Devices`. No se confía en un `recipientId` enviado
 por MQTT.
 
+`cameraConsent` debe quedar en `true` (booleano, no string) **explícitamente**
+para `pi-demo-01` en el entorno demo. `cameraConsentFn` (tramo de evidencia,
+ver `docs/ARCHITECTURE_DETAILED.md`) trata cualquier otro valor —incluida su
+ausencia— como consentimiento denegado: sin este seed, toda anomalía real
+resuelve en `evidenceStatus = SKIPPED_NO_CONSENT` y nunca se llega a probar
+`UPLOAD_EVIDENCE` de punta a punta.
+
 ```bash
 aws dynamodb put-item \
   --table-name SenseCare-Devices \
@@ -36,6 +43,7 @@ aws dynamodb put-item \
   --item '{
     "deviceId": {"S": "pi-demo-01"},
     "recipientId": {"S": "recipient-demo-01"},
+    "cameraConsent": {"BOOL": true},
     "createdAt": {"S": "2026-09-24T00:00:00Z"}
   }' \
   --condition-expression "attribute_not_exists(deviceId)"
@@ -50,6 +58,21 @@ aws dynamodb get-item \
   --region us-east-1 \
   --profile default \
   --key '{"deviceId":{"S":"pi-demo-01"}}'
+```
+
+Si `pi-demo-01` ya fue provisionado antes de que existiera el tramo de
+evidencia (sin `cameraConsent` en el item), añadirlo con una actualización
+idempotente en vez de repetir el `put-item` condicional:
+
+```bash
+aws dynamodb update-item \
+  --table-name SenseCare-Devices \
+  --region us-east-1 \
+  --profile default \
+  --key '{"deviceId":{"S":"pi-demo-01"}}' \
+  --update-expression "SET cameraConsent = :consent" \
+  --expression-attribute-values '{":consent":{"BOOL":true}}' \
+  --condition-expression "attribute_exists(deviceId)"
 ```
 
 ## 2. Crear Thing y certificado X.509

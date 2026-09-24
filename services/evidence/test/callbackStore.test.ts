@@ -132,7 +132,13 @@ describe("prepareUploadCommand", () => {
 
     const result = await prepareUploadCommand(TABLE, baseInput, "token-late", mintS3Key);
 
-    expect(result).toEqual({ action: "RESOLVE_IMMEDIATELY", outcomeType: "UPLOADED", reason: undefined });
+    expect(result).toEqual({
+      action: "RESOLVE_IMMEDIATELY",
+      outcomeType: "UPLOADED",
+      reason: undefined,
+      s3Key: "raw-images/recipient-demo-01/case-1/img-1.jpg",
+      imageId: "img-1",
+    });
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 

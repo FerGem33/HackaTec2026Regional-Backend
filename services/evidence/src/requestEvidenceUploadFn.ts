@@ -64,8 +64,19 @@ export async function handler(input: RequestEvidenceUploadInput): Promise<void> 
   if (result.action === "RESOLVE_IMMEDIATELY") {
     // Reintento tardio: el caso ya se resolvio en un intento anterior.
     // Resolvemos el token de ESTA invocacion sin tocar la tabla (nunca se
-    // escribe taskToken fuera de PENDING/ACK_ACCEPTED).
-    await resolveTaskToken(taskToken, result.outcomeType, result.reason);
+    // escribe taskToken fuera de PENDING/ACK_ACCEPTED). Si el resultado ya
+    // conocido fue UPLOADED, el output debe incluir s3Key/imageId igual que
+    // el camino normal de callback (ver tokenResolution.ts/callbackStore.ts):
+    // el siguiente estado de Step Functions los lee sin importar por cual
+    // de los dos caminos llego la resolucion.
+    await resolveTaskToken(
+      taskToken,
+      result.outcomeType,
+      result.reason,
+      result.outcomeType === "UPLOADED"
+        ? { outcome: result.outcomeType, s3Key: result.s3Key, imageId: result.imageId }
+        : undefined,
+    );
     return;
   }
 

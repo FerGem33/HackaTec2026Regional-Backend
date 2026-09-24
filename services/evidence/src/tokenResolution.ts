@@ -20,11 +20,15 @@ export async function resolveTaskToken(
   taskToken: string,
   outcomeType: ResolvedOutcomeType,
   reason?: string,
+  successOutput?: Record<string, unknown>,
 ): Promise<void> {
   try {
     if (outcomeType === SUCCESS_OUTCOME) {
       await sfn.send(
-        new SendTaskSuccessCommand({ taskToken, output: JSON.stringify({ outcome: outcomeType }) }),
+        new SendTaskSuccessCommand({
+          taskToken,
+          output: JSON.stringify(successOutput ?? { outcome: outcomeType }),
+        }),
       );
     } else {
       await sfn.send(
