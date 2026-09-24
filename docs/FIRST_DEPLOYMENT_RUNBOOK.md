@@ -33,14 +33,19 @@ Prerrequisitos de cuenta/región: una sola cuenta/región AWS ya elegida
 (Hito 0 del roadmap), con `aws sts get-caller-identity` verificado.
 
 ```bash
-cdk bootstrap aws://ACCOUNT_ID/REGION   # una sola vez por cuenta/región
 npm test
 npx tsc -p infra/tsconfig.json --noEmit
-npx cdk synth --strict
-npx cdk diff SenseCareDemoStack
-npx cdk deploy SenseCareDemoStack
+cd infra
+npx cdk list --profile <PROFILE> --region <REGION>
+npx cdk synth SenseCareDemoStack --strict --profile <PROFILE> --region <REGION>
+npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION> --profile <PROFILE> --region <REGION>
+npx cdk diff SenseCareDemoStack --profile <PROFILE> --region <REGION>
+npx cdk deploy SenseCareDemoStack --profile <PROFILE> --region <REGION> --require-approval broadening
 ```
 
+`infra/` contiene el `cdk.json`; se usa `npx cdk` para ejecutar la version
+del CLI declarada por el proyecto. Reemplazar los tres placeholders con la
+cuenta, region y perfil que se verificaron con `aws sts get-caller-identity`.
 Revisar el `cdk diff` antes de confirmar el deploy. No usar hotswap.
 
 ## 2. Seed manual de `Devices`
@@ -142,6 +147,73 @@ continuar al paso 6.
 Cargar el certificado correcto en `/etc/SenseCare/iot/`, arrancar el
 servicio `SenseCare-edge` (ver `EDGE_IMPLEMENTATION_GUIDE.md`) y repetir la
 verificación del paso 5 con hardware real en vez del MQTT Test Client.
+
+## Troubleshooting: "Resource ... already exists" en el primer deploy
+
+Síntoma: `cdk deploy` falla la validación del change set con errores como:
+
+```
+Resource of type 'AWS::DynamoDB::Table' with identifier 'SenseCare-Devices' already exists.
+Resource of type 'AWS::S3::Bucket' with identifier 'sensecare-private-images-<account>-<region>' already exists.
+```
+
+**Causa raíz (no es un bug de código):** las 5 tablas DynamoDB y el bucket de
+evidencia usan `RemovalPolicy.RETAIN` con nombres fijos (a propósito, para
+que nunca se pierdan datos por accidente). Si un primer intento de deploy
+avanza lo suficiente para que CloudFormation *cree* esos recursos y luego
+falla más adelante (por ejemplo, por el límite de concurrencia Lambda que ya
+se corrigió), CloudFormation hace rollback de la pila — pero como esos
+recursos son `RETAIN`, el rollback **no los borra**. La pila queda
+eliminada/recreada por CDK, pero los recursos siguen existiendo, huérfanos,
+sin pila que los administre. El siguiente `cdk deploy` intenta crear
+recursos con esos mismos nombres fijos y choca.
+
+### Diagnóstico y remediación
+
+1. **Verificar que están vacíos** antes de tocar nada (sólo lectura):
+
+   ```bash
+   for t in SenseCare-Devices SenseCare-Telemetry SenseCare-EventLog \
+            SenseCare-OpenCaseLocks SenseCare-AnomalyCases; do
+     aws dynamodb scan --table-name "$t" --select COUNT
+   done
+   aws s3 ls s3://sensecare-private-images-<account>-<region>/ --recursive
+   ```
+
+2. **Si todo da `Count: 0` y el bucket sale vacío** (caso esperado en un
+   primer intento de deploy, antes del seed del paso 2): borrar los
+   huérfanos y volver a desplegar.
+
+   ```bash
+   aws dynamodb delete-table --table-name SenseCare-Devices
+   aws dynamodb delete-table --table-name SenseCare-Telemetry
+   aws dynamodb delete-table --table-name SenseCare-EventLog
+   aws dynamodb delete-table --table-name SenseCare-OpenCaseLocks
+   aws dynamodb delete-table --table-name SenseCare-AnomalyCases
+   aws s3 rb s3://sensecare-private-images-<account>-<region>
+   npx cdk deploy SenseCareDemoStack
+   ```
+
+   Confirmar que cada tabla quedó realmente eliminada antes de redesplegar
+   (`aws dynamodb describe-table --table-name <t>` debe responder
+   `ResourceNotFoundException`), no sólo que el comando de borrado se
+   aceptó.
+
+3. **Si algún scan muestra datos reales** (ya se hizo el seed, o hay tráfico
+   real): **no borrar**. Usar `cdk import` para adoptar los recursos
+   existentes dentro de la pila sin recrearlos:
+
+   ```bash
+   npx cdk import SenseCareDemoStack
+   ```
+
+   Es interactivo y pide el ID físico de cada recurso a importar. Más
+   fricción que la opción 2, pero cero riesgo de pérdida de datos.
+
+Un agente de Claude Code puede ejecutar el paso 1 (sólo lectura) para
+ayudar a diagnosticar, pero el borrado del paso 2 y el `cdk import` del
+paso 3 requieren confirmación explícita de la persona antes de ejecutarse,
+por ser acciones irreversibles contra una cuenta AWS real.
 
 ## Rollback y limpieza
 
