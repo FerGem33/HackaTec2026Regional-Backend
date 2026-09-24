@@ -14,6 +14,7 @@ export default defineConfig({
       "services/evidence/test/setupEnv.ts",
       "services/analysis/test/setupEnv.ts",
       "services/cases/test/setupEnv.ts",
+      "services/push/test/setupEnv.ts",
     ],
   },
 });

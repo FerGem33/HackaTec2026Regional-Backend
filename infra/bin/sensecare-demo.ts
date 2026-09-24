@@ -40,4 +40,9 @@ new SenseCareDemoStack(app, "SenseCareDemoStack", {
   // email real en el repositorio ni un valor por defecto.
   alertSubscriptionEmails: optionalEmailList("ALERT_SUBSCRIPTION_EMAILS"),
   operationalSubscriptionEmails: optionalEmailList("OPERATIONAL_SUBSCRIPTION_EMAILS"),
+  // Opcional a proposito (hito de notificaciones): sin ella, el tramo de
+  // push (App de Pinpoint, rutas /me/push-devices, Task de push) no se
+  // construye y el stack despliega igual que antes de este hito. Nunca un
+  // valor por defecto ni el JSON real en Git.
+  fcmServiceAccountJson: process.env.FCM_SERVICE_ACCOUNT_JSON || undefined,
 });

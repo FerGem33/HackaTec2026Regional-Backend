@@ -1,0 +1,16 @@
+{
+  "name": "@sensecare/push",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Registro/baja de dispositivos moviles para push dirigido por Amazon Pinpoint/GCM (hito de notificaciones): POST/DELETE /me/push-devices.",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.686.0",
+    "@aws-sdk/client-pinpoint": "3.899.0",
+    "@aws-sdk/lib-dynamodb": "^3.686.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "aws-sdk-client-mock": "^4.1.0"
+  }
+}

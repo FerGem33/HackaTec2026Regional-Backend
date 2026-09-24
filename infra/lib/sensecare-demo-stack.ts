@@ -25,6 +25,10 @@ import { AlertsTable } from "./constructs/alerts-table";
 import { AlertsTopic } from "./constructs/alerts-topic";
 import { CasesApi } from "./constructs/cases-api";
 import { DlqAlarms } from "./constructs/dlq-alarms";
+import { CaregiverPushEndpointsTable } from "./constructs/caregiver-push-endpoints-table";
+import { AlertDeliveriesTable } from "./constructs/alert-deliveries-table";
+import { PushApplication } from "./constructs/push-application";
+import { PushDevicesApi } from "./constructs/push-devices-api";
 
 export interface SenseCareDemoStackProps extends cdk.StackProps {
   // Requeridos, sin default: deben venir de una verificacion manual de
@@ -39,6 +43,14 @@ export interface SenseCareDemoStackProps extends cdk.StackProps {
   // el deploy (ver runbook de alertas).
   alertSubscriptionEmails?: string[];
   operationalSubscriptionEmails?: string[];
+  // Opcional, sin default (hito de notificaciones): el JSON de cuenta de
+  // servicio de Firebase (API HTTP v1 de FCM). Sin esto, todo el tramo de
+  // push (tabla de endpoints se crea igual, pero la App de Pinpoint, las
+  // rutas /me/push-devices y la Task de push en Step Functions NO se
+  // construyen) queda omitido y el stack despliega exactamente igual que
+  // sin este hito. Ver infra/lib/constructs/push-application.ts para la
+  // advertencia de vigencia de este servicio (retiro anunciado 2026-10-30).
+  fcmServiceAccountJson?: string;
 }
 
 /**
@@ -120,6 +132,16 @@ export class SenseCareDemoStack extends cdk.Stack {
       operationalSubscriptionEmails: props.operationalSubscriptionEmails,
     });
 
+    // Hito de notificaciones: las 2 tablas de push se crean SIEMPRE (no
+    // dependen de ninguna credencial externa), pero la App de Pinpoint --y
+    // por tanto las rutas /me/push-devices y la Task de push en Step
+    // Functions-- solo se construyen si hay credencial de Firebase real.
+    const caregiverPushEndpoints = new CaregiverPushEndpointsTable(this, "CaregiverPushEndpointsTable");
+    const alertDeliveries = new AlertDeliveriesTable(this, "AlertDeliveriesTable");
+    const pushApplication = props.fcmServiceAccountJson
+      ? new PushApplication(this, "PushApplication", { fcmServiceAccountJson: props.fcmServiceAccountJson })
+      : undefined;
+
     const caseOrchestration = new CaseOrchestration(this, "CaseOrchestration", {
       eventBus,
       openCaseLocksTable: tables.openCaseLocksTable,
@@ -135,6 +157,13 @@ export class SenseCareDemoStack extends cdk.Stack {
       alertsTable: alerts.table,
       caregiverAccessTable: caregiverAccess.table,
       alertsTopic: alertsTopic.alertsTopic,
+      pushNotifications: pushApplication
+        ? {
+            caregiverPushEndpointsTable: caregiverPushEndpoints.table,
+            alertDeliveriesTable: alertDeliveries.table,
+            pinpointApplicationId: pushApplication.applicationId,
+          }
+        : undefined,
     });
 
     new DlqAlarms(this, "DlqAlarms", {
@@ -201,13 +230,28 @@ export class SenseCareDemoStack extends cdk.Stack {
       caregiverAccessTable: caregiverAccess.table,
     });
 
+    // Hito de notificaciones: solo si hay App de Pinpoint real (ver arriba).
+    if (pushApplication) {
+      new PushDevicesApi(this, "PushDevicesApi", {
+        httpApi: demoIngestApi.httpApi,
+        authorizer: demoIngestApi.authorizer,
+        caregiverPushEndpointsTable: caregiverPushEndpoints.table,
+        pinpointApplicationId: pushApplication.applicationId,
+      });
+    }
+
     new cdk.CfnOutput(this, "DemoUserPoolId", { value: demoAuth.userPool.userPoolId });
     new cdk.CfnOutput(this, "DemoUserPoolClientId", { value: demoAuth.userPoolClient.userPoolClientId });
-    // Base para las 7 rutas: POST {url}demo/devices/{deviceId}/events,
+    // Base para las rutas: POST {url}demo/devices/{deviceId}/events,
     // POST {url}devices/{deviceId}/pair, GET {url}devices/{deviceId}/latest,
-    // GET {url}devices/{deviceId}/telemetry, GET {url}cases/{caseId}/events,
-    // POST {url}cases/{caseId}/cancel, POST {url}cases/{caseId}/escalate
+    // GET {url}devices/{deviceId}/telemetry, GET {url}cases, GET
+    // {url}cases/{caseId}/events, POST {url}cases/{caseId}/cancel, POST
+    // {url}cases/{caseId}/escalate y, solo si hay App de Pinpoint, POST
+    // {url}me/push-devices / DELETE {url}me/push-devices/{endpointId}.
     new cdk.CfnOutput(this, "DemoIngestApiUrl", { value: demoIngestApi.httpApi.apiEndpoint });
+    if (pushApplication) {
+      new cdk.CfnOutput(this, "PinpointApplicationId", { value: pushApplication.applicationId });
+    }
 
     // TODO(Hito 4 - Orquestacion, siguiente tramo): renovar el TTL de
     // OpenCaseLocks periodicamente mientras el caso siga abierto (este

@@ -120,6 +120,46 @@ Resultados esperados:
 Ningún resultado cierra `AnomalyCases.status` ni dispara una llamada: este
 hito termina en el registro de la decisión humana.
 
+## 5.1. Historial de casos (`GET /cases`) — hito de notificaciones
+
+Mismo token JWT que la sección anterior. A diferencia de
+`/cases/{caseId}/events` (requiere conocer un `caseId`), esta ruta lista los
+casos de TODOS los `deviceId` que el usuario tiene emparejados:
+
+```bash
+curl "https://<DemoIngestApiUrl>/cases?limit=20" \
+  -H "Authorization: Bearer <IdToken>"
+```
+
+Un usuario sin ningún `deviceId` emparejado recibe `200` con `items: []`,
+nunca `403` (ver `services/cases/src/listCasesHandler.ts`).
+
+## 5.2. Push dirigido — hito de notificaciones (requiere Firebase real)
+
+Solo aplica si el stack se desplegó con `FCM_SERVICE_ACCOUNT_JSON` (ver
+`docs/IMPLEMENTATION_ROADMAP.md`, "Hito de notificaciones push y
+confirmación de voz"); sin esa variable, `PinpointApplicationId` no aparece
+en los Outputs del stack y las rutas `/me/push-devices` no existen.
+
+```bash
+# Registrar el token FCM del dispositivo del usuario autenticado
+curl -X POST "https://<DemoIngestApiUrl>/me/push-devices" \
+  -H "Authorization: Bearer <IdToken>" \
+  -H "Content-Type: application/json" \
+  -d '{"platform":"android","token":"<token FCM del dispositivo>"}'
+
+# Baja
+curl -X DELETE "https://<DemoIngestApiUrl>/me/push-devices/<endpointId>" \
+  -H "Authorization: Bearer <IdToken>"
+```
+
+Provocar una anomalía (sección 4) con al menos un endpoint activo
+registrado debe generar, ademas del correo de `DispatchAlertFn`, una fila en
+`SenseCare-AlertDeliveries` (PK `caseId`) con `status: "PUBLISHED"` por cada
+endpoint. Un token FCM inválido/desinstalado marca esa fila `FAILED` y pone
+`SenseCare-CaregiverPushEndpoints.status` en `DISABLED` para ese endpoint,
+sin bloquear el resto del caso.
+
 ## 6. Riesgos y límites conocidos
 
 - Si `DispatchAlertFn` muere exactamente entre reservar el envío y llamar a
@@ -134,3 +174,13 @@ hito termina en el registro de la decisión humana.
   momento de alertar, no una lista de destinatarios reales de ese envío.
 - `ESCALATE` no tiene ningún efecto más allá de registrar la intención; no
   existe todavía una `EscalationPolicy` ni `EmergencyDialer` que lo consuma.
+- `dispatchPushFn` (hito de notificaciones) NO tiene el mismo mecanismo de
+  auto-recuperación que `dispatchAlertFn`: si la invocación que gana el
+  `claim` muere entre reservarlo y llamar a Pinpoint, ese caso simplemente
+  no recibe push (el correo de `dispatchAlertFn` sigue siendo el canal
+  garantizado). Simplificación deliberada, ver docstring de
+  `dispatchPushFn.ts`.
+- El push usa Amazon Pinpoint (`AWS::Pinpoint::App`/`GCMChannel`), que AWS
+  anunció que retira el **2026-10-30**. Seguro para el demo del hackathon;
+  cualquier uso posterior a esa fecha necesita migrar (ver docstring de
+  `infra/lib/constructs/push-application.ts`).

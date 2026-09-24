@@ -1,7 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { SFNClient } from "@aws-sdk/client-sfn";
-import { SNSClient } from "@aws-sdk/client-sns";
 import { PinpointClient } from "@aws-sdk/client-pinpoint";
 
 const dynamoClient = new DynamoDBClient({});
@@ -10,6 +8,4 @@ export const ddb = DynamoDBDocumentClient.from(dynamoClient, {
   marshallOptions: { removeUndefinedValues: true },
 });
 
-export const sfn = new SFNClient({});
-export const sns = new SNSClient({});
 export const pinpoint = new PinpointClient({});

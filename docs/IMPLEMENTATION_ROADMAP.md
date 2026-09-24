@@ -230,6 +230,184 @@ auditado como `FAILED` sin bloquear evidencia/análisis; ver
 `docs/ALERTS_AND_CASE_ACTIONS_RUNBOOK.md` para el procedimiento de prueba
 completo.
 
+### Hito de notificaciones push y confirmación de voz — nuevo
+
+**Objetivo:** cerrar el ciclo humano del caso — push privado por dispositivo
+a la app móvil de cada familiar autorizado, check-in de voz por la Pi hacia
+la persona monitoreada, y una espera durable en Step Functions que cualquiera
+de las dos vías (voz o acción humana en la app/API) puede resolver. Este
+hito NO incluye la llamada telefónica de Connect — eso sigue siendo el
+Hito 6, que ahora conecta directamente al punto de timeout que este hito
+deja preparado.
+
+**Corrección tras implementar (2026-09-24):** el plan original de esta
+sección decía "SNS Mobile Push" (`sns.CfnPlatformApplication`). Al escribir
+el construct se descubrió que ese recurso YA NO EXISTE en la versión de
+`aws-cdk-lib` de este repo (2.270.0) — AWS lo está retirando. Se usa en su
+lugar **Amazon Pinpoint** (`aws-cdk-lib/aws-pinpoint`, `CfnApp` +
+`CfnGCMChannel`, IAM/ARN bajo el namespace histórico `mobiletargeting`),
+que sigue disponible y es la ruta que AWS mercadea hoy como parte de "AWS
+End User Messaging". **Advertencia real, no hipotética:** `cdk synth`
+reporta que `AWS::Pinpoint::App` también será retirado, el **2026-10-30**.
+Para el demo del hackathon esto es seguro (semanas antes del retiro), pero
+esta pieza necesita migrar a un servicio de push soportado a largo plazo
+antes de esa fecha si el proyecto continúa — ver el docstring de
+`infra/lib/constructs/push-application.ts`.
+
+#### 1. Infraestructura de push dirigido
+
+- `PushApplication` (construct nuevo, `infra/lib/constructs/push-application.ts`):
+  una App de Pinpoint + un canal GCM (FCM), credencial pasada como el JSON
+  de cuenta de servicio de Firebase (API HTTP v1, no la server key legacy
+  que Google también está retirando) vía parámetro/secret (nunca en Git —
+  mismo criterio que el número de Connect).
+- Tabla `SenseCare-CaregiverPushEndpoints` — PK `userId`, SK `endpointId`
+  (hash `sha256(userId + token)`, determinista: re-registrar el mismo
+  token nunca crea una fila duplicada). Campos: `platform` (`android`),
+  `status` (`ACTIVE`/`DISABLED`), `pushConsent`, `createdAt`, `updatedAt`.
+- Tabla `SenseCare-AlertDeliveries` — PK `caseId`, SK `deliveryId`
+  (`PUSH#{userId}#{endpointId}`). Campos: `status`
+  (`PENDING`/`PUBLISHED`/`FAILED`), `attempts`, `lastErrorCode`, `createdAt`,
+  `updatedAt`. Es auditoría de entrega por endpoint, hermana de `Alerts`
+  (que sigue siendo el estado global del caso), nunca un reemplazo.
+- Rutas nuevas en el mismo `HttpApi`/JWT de Cognito de Hito 5:
+  `POST /me/push-devices` (body `{ platform, token }`, hace
+  `mobiletargeting:UpdateEndpoint` — upsert nativo, sin necesitar una
+  consulta previa — y refleja el estado en `CaregiverPushEndpoints`;
+  `userId` sale sólo del JWT, nunca del body) y
+  `DELETE /me/push-devices/{endpointId}` (verifica ownership por `userId`
+  antes de `mobiletargeting:DeleteEndpoint` + borrar la fila).
+
+#### 2. Entrega dirigida (reemplaza el único canal SNS-email actual)
+
+- Nueva Lambda `dispatchPushFn`, invocada desde los DOS mismos puntos de la
+  máquina de estados que hoy invocan `dispatchAlertFn` (inmediato para
+  sensor crítico, y como red de seguridad al final del tramo de
+  evidencia/análisis) — mismo patrón de idempotencia por `caseId` que ya
+  usa `dispatchAlertFn`, para no duplicar push en reintentos.
+- Resuelve `deviceId → userIds` con el mismo GSI `CaregiverAccessByDevice`
+  ya existente, luego `userId → endpoints activos` con
+  `CaregiverPushEndpoints` (Query por PK), y publica con
+  `mobiletargeting:SendMessages` dirigido por `Endpoints: {
+  [endpointId]: {} }` — nunca una difusión a todos los endpoints de la
+  app. Un cuidador de `pi-demo-01` no puede recibir push de otro
+  `deviceId` aunque comparta la misma app.
+- El mensaje usa `GCMMessage.RawContent` con el JSON crudo
+  `{ "data": { type: "SENSECARE_ALERT", caseId, severity, title, body } }`
+  — el mismo formato *data-only* plano que la app móvil ya espera en
+  `Alert.fromPushData` (`app_hackatec_regional/docs/AWS_SNS_FCM.md`):
+  `RawContent` se entrega tal cual a FCM, sin envolverlo en el objeto
+  `data.pinpoint.jsonBody` que usaría el campo `Data` normal de Pinpoint.
+  Nunca nombre, `recipientId`, diagnóstico de Bedrock, imagen ni URL de S3.
+- Un `DeliveryStatus` de `PERMANENT_FAILURE`/token inválido marca ese
+  endpoint `DISABLED` en `CaregiverPushEndpoints` y `FAILED` en
+  `AlertDeliveries`; nunca relanza excepción ni bloquea el resto de la
+  ejecución (mismo principio que `dispatchAlertFn` con `sns:Publish` a
+  topic).
+- El topic `SenseCare-Alerts` (email) se conserva sin cambios como canal
+  secundario/de respaldo para el demo; no se retira en este hito.
+
+#### 3. Check-in de voz (Pi ↔ nube)
+
+- Nuevo comando MQTT `VOICE_CHECKIN` (mismo topic de comandos por
+  `deviceId` que ya usa `UPLOAD_EVIDENCE`), publicado por una Lambda
+  `requestVoiceCheckinFn` — fire-and-forget, no espera respuesta ella
+  misma (igual que el envío del comando dentro de
+  `requestEvidenceUploadFn`, pero sin el `waitForTaskToken` propio).
+- La Pi reproduce la pregunta por bocina y escucha una respuesta corta
+  (sí/no o silencio) — implementación de reconocimiento de voz es
+  responsabilidad edge (`EDGE_IMPLEMENTATION_GUIDE.md`), fuera de este
+  hito de backend.
+- Nuevo evento entrante autenticado por certificado de dispositivo
+  `VOICE_CHECKIN_RESULT` con `{ caseId, result: "CONFIRMED_OK" |
+  "CONFIRMED_RISK" | "NO_RESPONSE" }` — misma IoT Rule → SQS → Lambda con
+  `ReportBatchItemFailures` que ya usan telemetría/anomalías (Hito 2), sin
+  inventar un mecanismo de ingesta nuevo.
+- Handler `voiceCheckinResultHandler`: reutiliza `applyAlertDecision` tal
+  cual (actor sintético `"voice-checkin"` en vez de un `userId` de
+  Cognito) — `CONFIRMED_OK` → `CANCELLED`, `CONFIRMED_RISK`/`NO_RESPONSE`
+  → `ESCALATED`. Mismo idempotente `TransactWriteItems`, misma auditoría en
+  `EventLog`, cero lógica de decisión duplicada.
+
+#### 4. Espera durable y resolución cruzada (voz o app, cualquiera resuelve)
+
+- Tabla `SenseCare-DecisionCallbacks` — PK `caseId`. Campos: `taskToken`,
+  `createdAt`, TTL corto (mismo patrón que `EvidenceCallbacks`: token de
+  tarea nunca se guarda en `AnomalyCases`/`EventLog`, sólo transita aquí
+  mientras la espera está abierta).
+- Nuevo estado `WaitForCaregiverDecision` en `CaseOrchestration`
+  (`sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN`), insertado después de
+  `NotifyCaregiversIfNotAlready`/`DispatchAlertImmediate` (en paralelo con
+  `DispatchPushNotifications` y `RequestVoiceCheckIn`, que no bloquean).
+  Timeout configurable (`caregiverDecisionTimeoutSeconds`, default corto
+  para demo, p. ej. 90–120 s).
+- `cancelCaseHandler`/`escalateCaseHandler` (existentes): después de que
+  `applyAlertDecision` resuelva `APPLIED` o `NOOP`, buscan
+  `DecisionCallbacks` por `caseId`; si hay `taskToken`, llaman
+  `SendTaskSuccess({ decision })` y borran la fila. Si no hay fila (la
+  espera ya venció o nunca llegó a abrirse), la ruta sigue respondiendo
+  200/409 exactamente igual que hoy — el nuevo comportamiento es aditivo.
+- `voiceCheckinResultHandler` hace lo mismo tras aplicar su decisión.
+- Timeout nativo de Step Functions (nadie resolvió): transiciona a un
+  estado terminal `PendingHumanEscalation` (Lambda mínima que marca
+  `alertStatus: ESCALATED` con actor `"timeout"`, vía la misma
+  `applyAlertDecision`) — **sin invocar ningún dialer todavía**. Este es
+  exactamente el punto donde el Hito 6 conecta `EmergencyDialer` más
+  adelante; no se construye la llamada en este hito.
+
+#### 5. Historial de alertas para simulador y app móvil
+
+- Nuevo GSI `AnomalyCasesByDevice` (PK `deviceId`, SK `createdAt`) sobre
+  `SenseCare-AnomalyCases` — la tabla hoy sólo tiene PK `caseId`, sin forma
+  de listar "los últimos casos de este dispositivo" sin Scan.
+- Nueva ruta `GET /cases` (mismo `HttpApi`/JWT): resuelve los `deviceId`
+  autorizados del `userId` del JWT vía `CaregiverAccess` (Query por PK,
+  sin GSI), hace un Query por cada uno contra `AnomalyCasesByDevice`
+  (`ScanIndexForward: false`, `limit`/paginación igual que
+  `getDeviceTelemetry`), fusiona y ordena por `createdAt` desc. Responde
+  sólo campos saneados: `caseId, deviceId, eventType, anomalyType,
+  severity, status, alertStatus, evidenceStatus, analysisStatus,
+  createdAt, updatedAt` — nunca s3Key, imageId ni texto de Bedrock.
+- `GET /cases/{caseId}/events` se mantiene sin cambios de contrato (línea
+  de tiempo detallada de un caso puntual); `GET /cases` es la vista de
+  lista que faltaba para pintar historial sin tener que conocer un
+  `caseId` de antemano.
+
+#### 6. Prueba de aceptación
+
+- Un familiar con `pushConsent=true` y endpoint activo recibe el push;
+  otro usuario sin `CaregiverAccess` sobre ese `deviceId` no recibe nada y
+  obtiene 403 si intenta abrir el caso.
+- `CANCEL_ALERT` desde la app resuelve `WaitForCaregiverDecision` y el
+  timeout nunca llega a `PendingHumanEscalation`.
+- Un `VOICE_CHECKIN_RESULT` con `CONFIRMED_RISK` resuelve la espera hacia
+  `ESCALATED` aunque ningún familiar haya tocado la app.
+- Sin respuesta de ninguna de las dos vías, el timeout nativo marca
+  `ESCALATED` por `"timeout"` sin llamar a nada.
+- Token FCM inválido se marca `DISABLED`; no bloquea el caso si queda otro
+  endpoint válido, y no cierra el caso si no queda ninguno (auditar como
+  `NO_ACTIVE_PUSH_CHANNEL`, análogo a `NO_ACTIVE_HUMAN_NOTIFICATION_CHANNEL`
+  del plan original).
+- `GET /cases` para un usuario con 2 dispositivos emparejados devuelve
+  ambos historiales fusionados y ordenados; un usuario sin
+  `CaregiverAccess` en ninguno recibe lista vacía, nunca 403 (a diferencia
+  de `/cases/{caseId}/events`, que sí es por-recurso).
+
+**Qué se puede paralelizar:** la sección 1+2+5 (tablas nuevas, rutas
+`/me/push-devices` y `GET /cases`, `dispatchPushFn`) no dependen de la
+sección 3+4 (voz + espera durable en Step Functions) — son archivos y
+construct props distintos salvo el `CaseOrchestrationProps` compartido.
+Pueden implementarse en paralelo por dos personas/agentes y converger sólo
+al conectar ambos bloques de tasks a la máquina de estados. La creación del
+proyecto Firebase (paso manual, no CDK) debe iniciarse de inmediato porque
+está en la ruta crítica y no depende de nada de este repo.
+
+**Criterio de salida:** un push llega sólo a quien tiene acceso; una
+`VOICE_CHECKIN_RESULT` y una acción de app pueden resolver el mismo caso
+sin condición de carrera rota (la que pierde ve `NOOP`, nunca duplica
+efectos); `GET /cases` pinta un historial real en simulador y app móvil sin
+necesitar `EventLog` caso por caso.
+
 ### Hito 6 — Notificaciones y llamada de último recurso
 
 **Objetivo:** comprobar la parte más delicada antes del ensayo final.

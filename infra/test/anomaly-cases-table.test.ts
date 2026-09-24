@@ -29,4 +29,44 @@ describe("AnomalyCasesTable", () => {
     const [table] = Object.values(tables);
     expect((table as { Properties: Record<string, unknown> }).Properties.TimeToLiveSpecification).toBeUndefined();
   });
+
+  it("adds an AnomalyCasesByDevice GSI (PK deviceId, SK createdAt) with a limited, safe projection", () => {
+    const template = synth();
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "SenseCare-AnomalyCases",
+      GlobalSecondaryIndexes: [
+        {
+          IndexName: "AnomalyCasesByDevice",
+          KeySchema: [
+            { AttributeName: "deviceId", KeyType: "HASH" },
+            { AttributeName: "createdAt", KeyType: "RANGE" },
+          ],
+          Projection: {
+            ProjectionType: "INCLUDE",
+            NonKeyAttributes: [
+              "eventType",
+              "anomalyType",
+              "severity",
+              "status",
+              "alertStatus",
+              "evidenceStatus",
+              "analysisStatus",
+              "updatedAt",
+            ],
+          },
+        },
+      ],
+    });
+  });
+
+  it("never projects evidence S3 keys/image ids or Bedrock-derived text onto the GSI", () => {
+    const template = synth();
+    const [table] = Object.values(template.findResources("AWS::DynamoDB::Table")) as Array<{
+      Properties: { GlobalSecondaryIndexes: Array<{ Projection: { NonKeyAttributes: string[] } }> };
+    }>;
+    const projected = table.Properties.GlobalSecondaryIndexes[0]?.Projection.NonKeyAttributes ?? [];
+    for (const forbidden of ["evidenceS3Key", "evidenceImageId", "evidenceReason", "analysisRiskIndicators"]) {
+      expect(projected).not.toContain(forbidden);
+    }
+  });
 });

@@ -42,17 +42,18 @@ function synth(): Template {
 }
 
 describe("CasesApi", () => {
-  it("creates exactly 3 Lambda functions and no new API Gateway (reuses the one passed in)", () => {
+  it("creates exactly 4 Lambda functions and no new API Gateway (reuses the one passed in)", () => {
     const template = synth();
-    template.resourceCountIs("AWS::Lambda::Function", 3);
+    template.resourceCountIs("AWS::Lambda::Function", 4);
     template.resourceCountIs("AWS::ApiGatewayV2::Api", 1); // el que ya paso el test, no uno nuevo
   });
 
-  it("creates exactly the 3 routes protected by the SAME authorizer instance passed in (reuses DemoAuth's JWT, no second User Pool)", () => {
+  it("creates exactly the 4 routes protected by the SAME authorizer instance passed in (reuses DemoAuth's JWT, no second User Pool)", () => {
     const template = synth();
     template.resourceCountIs("AWS::ApiGatewayV2::Authorizer", 1); // el que ya paso el test
-    template.resourceCountIs("AWS::ApiGatewayV2::Route", 3);
+    template.resourceCountIs("AWS::ApiGatewayV2::Route", 4);
     for (const routeKey of [
+      "GET /cases",
       "GET /cases/{caseId}/events",
       "POST /cases/{caseId}/cancel",
       "POST /cases/{caseId}/escalate",
@@ -104,7 +105,7 @@ describe("CasesApi", () => {
     expect(transactStatements.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("all 3 Lambdas receive the 4 table names they need as environment variables", () => {
+  it("all 3 case-action Lambdas receive the 4 table names they need as environment variables", () => {
     const template = synth();
     for (const functionName of ["SenseCare-getCaseEvents", "SenseCare-cancelCase", "SenseCare-escalateCase"]) {
       template.hasResourceProperties("AWS::Lambda::Function", {
@@ -119,5 +120,18 @@ describe("CasesApi", () => {
         },
       });
     }
+  });
+
+  it("SenseCare-listCases only gets the 2 table names it needs (never ALERTS_TABLE_NAME/EVENT_LOG_TABLE_NAME)", () => {
+    const template = synth();
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "SenseCare-listCases",
+      Environment: {
+        Variables: Match.objectEquals({
+          ANOMALY_CASES_TABLE_NAME: Match.anyValue(),
+          CAREGIVER_ACCESS_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
   });
 });

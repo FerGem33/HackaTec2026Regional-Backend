@@ -9,6 +9,14 @@ import { Construct } from "constructs";
  * Sin TTL: a diferencia de OpenCaseLocks (un candado efimero), un caso es
  * un registro durable. RemovalPolicy.RETAIN, igual que las tablas de
  * Hito 2, para que un cdk destroy nunca borre datos de caso.
+ *
+ * GSI `AnomalyCasesByDevice` (PK deviceId, SK createdAt, hito de
+ * notificaciones/historial): la tabla base solo responde "dame ESTE caso"
+ * en O(1); no hay forma de listar "los casos recientes de este deviceId"
+ * sin un Scan. `listCasesHandler` (GET /cases) es el unico consumidor.
+ * Proyeccion INCLUDE, no ALL: solo los campos que ese endpoint saneado
+ * expone -- nunca evidenceS3Key/evidenceImageId ni el resto de campos
+ * internos de evidencia/analisis.
  */
 export class AnomalyCasesTable extends Construct {
   public readonly table: dynamodb.Table;
@@ -21,6 +29,23 @@ export class AnomalyCasesTable extends Construct {
       partitionKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.table.addGlobalSecondaryIndex({
+      indexName: "AnomalyCasesByDevice",
+      partitionKey: { name: "deviceId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: [
+        "eventType",
+        "anomalyType",
+        "severity",
+        "status",
+        "alertStatus",
+        "evidenceStatus",
+        "analysisStatus",
+        "updatedAt",
+      ],
     });
   }
 }

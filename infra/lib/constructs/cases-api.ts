@@ -29,20 +29,25 @@ const commonFnProps = {
 } satisfies Partial<lambdaNodejs.NodejsFunctionProps>;
 
 /**
- * Acciones humanas autenticadas sobre un caso (hito de alertas): GET
- * /cases/{caseId}/events, POST /cases/{caseId}/cancel (CANCEL_ALERT), POST
- * /cases/{caseId}/escalate (ESCALATE). Reutiliza el HttpApi y el JWT
- * authorizer YA creados por DemoIngestApi (mismo Cognito User Pool, misma
- * URL base) en vez de levantar un segundo API Gateway.
+ * Acciones humanas autenticadas sobre un caso (hito de alertas + hito de
+ * notificaciones): GET /cases (historial), GET /cases/{caseId}/events,
+ * POST /cases/{caseId}/cancel (CANCEL_ALERT), POST /cases/{caseId}/escalate
+ * (ESCALATE). Reutiliza el HttpApi y el JWT authorizer YA creados por
+ * DemoIngestApi (mismo Cognito User Pool, misma URL base) en vez de
+ * levantar un segundo API Gateway.
  *
  * Autorizacion en 2 pasos, siempre en este orden (ver
  * services/cases/src/decisionHandlerCore.ts): resolver caseId -> deviceId
  * via AnomalyCases, luego verificar CaregiverAccess(userId, deviceId). Un
  * 403/404 se responde ANTES de tocar EventLog o el cuerpo de la respuesta;
- * ninguna de las 3 rutas confia en un recipientId/deviceId enviado por el
- * cliente.
+ * ninguna de las 4 rutas confia en un recipientId/deviceId enviado por el
+ * cliente. GET /cases es la unica excepcion deliberada a "403 si no hay
+ * acceso": es una vista por-usuario (lista, no un recurso puntual), asi que
+ * "sin ningun deviceId emparejado" responde 200 con lista vacia (ver
+ * services/cases/src/listCasesHandler.ts).
  */
 export class CasesApi extends Construct {
+  public readonly listCasesFn: lambdaNodejs.NodejsFunction;
   public readonly getCaseEventsFn: lambdaNodejs.NodejsFunction;
   public readonly cancelCaseFn: lambdaNodejs.NodejsFunction;
   public readonly escalateCaseFn: lambdaNodejs.NodejsFunction;
@@ -56,6 +61,21 @@ export class CasesApi extends Construct {
       EVENT_LOG_TABLE_NAME: props.eventLogTable.tableName,
       CAREGIVER_ACCESS_TABLE_NAME: props.caregiverAccessTable.tableName,
     };
+
+    this.listCasesFn = new lambdaNodejs.NodejsFunction(this, "ListCasesFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-listCases",
+      entry: path.join(SERVICE_ENTRY_ROOT, "listCasesHandler.ts"),
+      environment: {
+        ANOMALY_CASES_TABLE_NAME: props.anomalyCasesTable.tableName,
+        CAREGIVER_ACCESS_TABLE_NAME: props.caregiverAccessTable.tableName,
+      },
+    });
+    // Solo Query (nunca Scan): CaregiverAccess por PK userId, AnomalyCases
+    // por el GSI AnomalyCasesByDevice. Sin dynamodb:GetItem: esta ruta
+    // nunca lee un caso puntual, solo listas.
+    props.caregiverAccessTable.grant(this.listCasesFn, "dynamodb:Query");
+    props.anomalyCasesTable.grant(this.listCasesFn, "dynamodb:Query");
 
     this.getCaseEventsFn = new lambdaNodejs.NodejsFunction(this, "GetCaseEventsFn", {
       ...commonFnProps,
@@ -82,6 +102,13 @@ export class CasesApi extends Construct {
       environment: readEnvironment,
     });
     this.grantDecisionPermissions(this.escalateCaseFn, props);
+
+    props.httpApi.addRoutes({
+      path: "/cases",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: new HttpLambdaIntegration("ListCasesIntegration", this.listCasesFn),
+      authorizer: props.authorizer,
+    });
 
     props.httpApi.addRoutes({
       path: "/cases/{caseId}/events",

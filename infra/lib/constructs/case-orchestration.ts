@@ -27,6 +27,16 @@ export interface CaseOrchestrationProps {
   // Debe exponer el GSI "CaregiverAccessByDevice" (ver caregiver-access-table.ts).
   caregiverAccessTable: dynamodb.ITable;
   alertsTopic: sns.ITopic;
+  // --- Hito de notificaciones push (opcional) ---
+  // Sin esto, el tramo de push simplemente no se construye (ver mas abajo):
+  // el stack sigue desplegando exactamente igual que sin este hito. Solo se
+  // pasa una vez exista una App de Pinpoint real (ver push-application.ts),
+  // que a su vez requiere credencial de Firebase real.
+  pushNotifications?: {
+    caregiverPushEndpointsTable: dynamodb.ITable;
+    alertDeliveriesTable: dynamodb.ITable;
+    pinpointApplicationId: string;
+  };
   // Sin default: el operador debe verificar disponibilidad/acceso real del
   // modelo (aws bedrock list-foundation-models/list-inference-profiles,
   // solo lectura) antes de desplegar. bedrockModelId es el valor que se
@@ -83,6 +93,14 @@ export class CaseOrchestration extends Construct {
 
   constructor(scope: Construct, id: string, props: CaseOrchestrationProps) {
     super(scope, id);
+
+    // Se asignan mas abajo, dentro del bloque condicional de push (solo si
+    // props.pushNotifications existe); `.next()` de dispatchAlertImmediateTask
+    // y notifyCaregiversIfNotAlreadyTask se fija DESPUES de saber si estas
+    // tasks existen, para insertarlas en la cadena sin llamar `.next()` dos
+    // veces sobre el mismo estado (Step Functions lo prohibe).
+    let dispatchPushImmediateTask: tasks.LambdaInvoke | undefined;
+    let dispatchPushIfNotAlreadyTask: tasks.LambdaInvoke | undefined;
 
     // Sin reservedConcurrentExecutions: ver ingestion-functions.ts para el
     // porque (la cuenta debe conservar al menos 10 ejecuciones Lambda no
@@ -374,7 +392,9 @@ export class CaseOrchestration extends Construct {
       errors: [sfn.Errors.ALL],
       resultPath: "$.alertError",
     });
-    dispatchAlertImmediateTask.next(prepareEvidencePhase);
+    // .next() se fija mas abajo (bloque "Push dirigido"), una vez se sabe
+    // si dispatchPushImmediateTask existe: no se puede llamar .next() dos
+    // veces sobre el mismo estado.
 
     const classifySeverityChoice = new sfn.Choice(this, "ClassifySeverity")
       .when(
@@ -411,6 +431,75 @@ export class CaseOrchestration extends Construct {
 
     const caseAnalysisPhaseComplete = new sfn.Succeed(this, "CaseAnalysisPhaseComplete");
 
+    // --- Push dirigido (hito de notificaciones, opcional) ---
+    // MISMA Lambda invocada en los DOS mismos puntos que dispatchAlertFn
+    // (inmediato para sensor critico, y como red de seguridad al final del
+    // tramo de evidencia/analisis): complementa el aviso por email, nunca
+    // lo reemplaza. Ver services/orchestration/src/dispatchPushFn.ts.
+    if (props.pushNotifications) {
+      const { caregiverPushEndpointsTable, alertDeliveriesTable, pinpointApplicationId } = props.pushNotifications;
+
+      const dispatchPushFn = new lambdaNodejs.NodejsFunction(this, "DispatchPushFn", {
+        ...commonFnProps,
+        functionName: "SenseCare-dispatchPush",
+        entry: path.join(ORCHESTRATION_ENTRY_ROOT, "dispatchPushFn.ts"),
+        environment: {
+          CAREGIVER_ACCESS_TABLE_NAME: props.caregiverAccessTable.tableName,
+          CAREGIVER_PUSH_ENDPOINTS_TABLE_NAME: caregiverPushEndpointsTable.tableName,
+          ALERT_DELIVERIES_TABLE_NAME: alertDeliveriesTable.tableName,
+          PINPOINT_APPLICATION_ID: pinpointApplicationId,
+        },
+      });
+      // Solo lectura del GSI inverso, igual que dispatchAlertFn.
+      props.caregiverAccessTable.grant(dispatchPushFn, "dynamodb:Query");
+      caregiverPushEndpointsTable.grant(dispatchPushFn, "dynamodb:Query", "dynamodb:UpdateItem");
+      alertDeliveriesTable.grant(dispatchPushFn, "dynamodb:PutItem");
+      // mobiletargeting:SendMessages acotado a ESTA app de Pinpoint, nunca
+      // mobiletargeting:* ni otra app/proyecto.
+      dispatchPushFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["mobiletargeting:SendMessages"],
+          resources: [`arn:aws:mobiletargeting:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:apps/${pinpointApplicationId}`],
+        }),
+      );
+
+      dispatchPushImmediateTask = new tasks.LambdaInvoke(this, "DispatchPushImmediate", {
+        lambdaFunction: dispatchPushFn,
+        payload: taskPayload,
+        payloadResponseOnly: true,
+        resultPath: sfn.JsonPath.DISCARD,
+        retryOnServiceExceptions: true,
+      });
+      // Mismo principio que dispatchAlertImmediateTask: un fallo de
+      // invocacion de push nunca debe bloquear el tramo de evidencia.
+      dispatchPushImmediateTask.addCatch(prepareEvidencePhase, {
+        errors: [sfn.Errors.ALL],
+        resultPath: "$.pushError",
+      });
+      dispatchPushImmediateTask.next(prepareEvidencePhase);
+
+      dispatchPushIfNotAlreadyTask = new tasks.LambdaInvoke(this, "DispatchPushIfNotAlready", {
+        lambdaFunction: dispatchPushFn,
+        payload: sfn.TaskInput.fromObject({
+          "caseDetail.$": "$.caseDetail",
+          "executionArn.$": "$.executionArn",
+        }),
+        payloadResponseOnly: true,
+        resultPath: sfn.JsonPath.DISCARD,
+        retryOnServiceExceptions: true,
+      });
+      dispatchPushIfNotAlreadyTask.addCatch(caseAnalysisPhaseComplete, {
+        errors: [sfn.Errors.ALL],
+        resultPath: "$.pushError",
+      });
+      dispatchPushIfNotAlreadyTask.next(caseAnalysisPhaseComplete);
+    }
+
+    // dispatchAlertImmediateTask.next() diferido hasta aqui (ver su
+    // addCatch mas arriba): inserta el push inmediato en la cadena solo si
+    // existe, sin alterar el resto del tramo de evidencia.
+    dispatchAlertImmediateTask.next(dispatchPushImmediateTask ?? prepareEvidencePhase);
+
     // --- Red de seguridad de alertas (hito de alertas) ---
     // Se llega aqui por dos caminos: evidencia disponible ya analizada
     // (recordAnalysisOutcomeTask) o evidencia SKIPPED_NO_CONSENT/INCOMPLETE/
@@ -435,7 +524,9 @@ export class CaseOrchestration extends Construct {
       errors: [sfn.Errors.ALL],
       resultPath: "$.alertError",
     });
-    notifyCaregiversIfNotAlreadyTask.next(caseAnalysisPhaseComplete);
+    // Inserta el push de red-de-seguridad en la cadena solo si existe (ver
+    // bloque "Push dirigido" mas arriba).
+    notifyCaregiversIfNotAlreadyTask.next(dispatchPushIfNotAlreadyTask ?? caseAnalysisPhaseComplete);
 
     const analysisRecordingFailed = new sfn.Fail(this, "AnalysisOutcomeRecordingFailed", {
       error: "AnalysisOutcomeRecordingFailed",
