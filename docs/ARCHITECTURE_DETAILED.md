@@ -169,9 +169,11 @@ Se necesitan reglas IoT separadas para telemetría, anomalía visual, anomalía 
 Consulta inicial:
 
 ```sql
-SELECT *, topic() AS mqttTopic, timestamp() AS receivedAt
+SELECT *, topic(4) AS mqttDeviceId
 FROM 'SenseCare/v1/devices/+/telemetry'
 ```
+
+`topic(4)` extrae el `deviceId` real del topic MQTT (AWS IoT SQL indexa segmentos desde 1: `SenseCare`=1, `v1`=2, `devices`=3, `{deviceId}`=4). `mqttDeviceId` es metadato de **transporte**, nunca parte de los contratos de `@sensecare/contracts` (`additionalProperties:false`): cada Lambda de ingesta lo separa del payload y rechaza el mensaje si no coincide exactamente con el `deviceId` declarado dentro del JSON, antes de validar el schema y antes de tocar DynamoDB o EventBridge. Esto evita que un dispositivo autenticado en su propio topic falsifique dentro del cuerpo JSON el `deviceId` de otro. No se agregan otras columnas calculadas como `topic() AS mqttTopic` o `timestamp() AS receivedAt`: eso rompería el schema estricto para todo mensaje real.
 
 Configuración:
 

@@ -11,9 +11,12 @@
     "constructs": "^10.4.2"
   },
   "devDependencies": {
+    "@sensecare/contracts": "*",
     "aws-cdk": "^2.161.1",
+    "esbuild": "^0.24.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.6.3",
-    "@types/node": "^22.7.5"
+    "@types/node": "^22.7.5",
+    "@types/aws-lambda": "^8.10.145"
   }
 }
