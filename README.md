@@ -97,6 +97,7 @@ Fuera de alcance:
 - [Roadmap de implementación y despliegue](docs/IMPLEMENTATION_ROADMAP.md)
 - [Guía de implementación edge: Raspberry Pi 4B + ESP32](docs/EDGE_IMPLEMENTATION_GUIDE.md)
 - [Aprovisionamiento de dispositivo y prueba de humo MQTT](docs/DEVICE_PROVISIONING_AND_SMOKE_TEST.md)
+- [Runbook de alertas SNS y acciones humanas de caso](docs/ALERTS_AND_CASE_ACTIONS_RUNBOOK.md)
 - [Configuración de subagentes para Claude Code](docs/CLAUDE_MULTIAGENT_SETUP.md)
 - [Guía de desarrollo del monorepo (contratos, pruebas, simulador)](docs/DEVELOPMENT.md)
 - [Guía de integración del simulador de demo](docs/SIMULATOR_INTEGRATION_GUIDE.md)
@@ -105,3 +106,5 @@ Fuera de alcance:
 ## Estado
 
 Arquitectura definida. Primera ola en desarrollo: contratos compartidos (`packages/contracts`), simulador local de gateway (`simulators/gateway-sim`) y esqueleto de infraestructura CDK (`infra/`, sin recursos ni despliegue). El resto de servicios backend, la integración edge real y la aplicación siguen pendientes.
+
+Implementado desde entonces (no reflejado arriba): ingesta IoT completa, orquestación de casos con Step Functions Standard, transporte de evidencia puntual, análisis visual con Bedrock, Cognito + API HTTP para el simulador/app móvil, y el hito de alertas (SNS deduplicado por caso + `CANCEL_ALERT`/`ESCALATE` autenticados). Ver `docs/IMPLEMENTATION_ROADMAP.md` para el detalle por hito.

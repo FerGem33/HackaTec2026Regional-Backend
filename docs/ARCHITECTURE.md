@@ -78,7 +78,7 @@ La Raspberry Pi es el gateway deliberado: evita ejecutar visión, cámara, audio
 | Escalamiento telefónico | Step Functions + EscalationPolicy + Amazon Connect Customer (Voice) | El timeout lleva siempre a la política determinista; el agente puede pedirlo antes, pero no es requisito para el fallback. |
 | API de control y simulación | API Gateway + Lambda | REST autorizada por Cognito/rol demo: consulta casi en tiempo real, acciones humanas y adaptador de simulador web. |
 | Login y roles | Cognito | Roles mínimos: `caregiver` y `admin`; el usuario sólo accede a sus pacientes/dispositivos. |
-| Alertas | SNS (MVP) | Email/SMS para demo; API/CLI consulta casos y telemetría. |
+| Alertas | SNS (implementado) | Solo email, deduplicado por `caseId`; `CANCEL_ALERT`/`ESCALATE` autenticados vía API/CLI (ver `docs/ALERTS_AND_CASE_ACTIONS_RUNBOOK.md`). Sin SMS/push en este hito. |
 
 AWS IoT Core usa MQTT y su Rules Engine puede enrutar mensajes hacia S3, DynamoDB, Lambda o SQS; aquí se elige SQS antes de Lambda para tolerar picos y errores transitorios. [Documentación de AWS IoT Core](https://docs.aws.amazon.com/iot/latest/developerguide/aws-iot-how-it-works.html)
 

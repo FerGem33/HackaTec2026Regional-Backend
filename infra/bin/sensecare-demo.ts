@@ -15,6 +15,18 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function optionalEmailList(name: string): string[] | undefined {
+  const raw = process.env[name];
+  if (!raw) {
+    return undefined;
+  }
+  const emails = raw
+    .split(",")
+    .map((email) => email.trim())
+    .filter((email) => email.length > 0);
+  return emails.length > 0 ? emails : undefined;
+}
+
 new SenseCareDemoStack(app, "SenseCareDemoStack", {
   description: "SenseCare demo stack.",
   bedrockModelId: requireEnv("BEDROCK_MODEL_ID"),
@@ -23,4 +35,9 @@ new SenseCareDemoStack(app, "SenseCareDemoStack", {
     .split(",")
     .map((arn) => arn.trim())
     .filter((arn) => arn.length > 0),
+  // Opcionales a proposito: sin ellas, cero suscripciones se crean por CDK y
+  // se agregan a mano tras el deploy (ver runbook de alertas). Nunca un
+  // email real en el repositorio ni un valor por defecto.
+  alertSubscriptionEmails: optionalEmailList("ALERT_SUBSCRIPTION_EMAILS"),
+  operationalSubscriptionEmails: optionalEmailList("OPERATIONAL_SUBSCRIPTION_EMAILS"),
 });

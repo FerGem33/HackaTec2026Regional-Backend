@@ -3,7 +3,7 @@ import { mockClient } from "aws-sdk-client-mock";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
 import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge";
-import { validateVisualAnomaly } from "@sensecare/contracts";
+import { validateSensorAnomaly, validateVisualAnomaly } from "@sensecare/contracts";
 import { processAnomalyRecord } from "../src/anomalyIngestCore.js";
 import { DeviceIdMismatchError } from "../src/envelope.js";
 import { config } from "../src/config.js";
@@ -223,6 +223,40 @@ describe("processAnomalyRecord", () => {
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(0);
+  });
+
+  it("propagates severity into the EventBridge detail for a SENSOR_ANOMALY", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
+
+    const sensorAnomaly = {
+      eventId: "33333333-3333-4333-9333-333333333333",
+      eventType: "SENSOR_ANOMALY",
+      deviceId: "pi-demo-01",
+      occurredAt: "2026-09-23T18:30:00Z",
+      anomalyType: "TEMPERATURE_ALERT",
+      severity: "critical",
+      sensorRule: { ruleVersion: "sensor-rules-v1", windowSeconds: 60, trigger: "temp_rise" },
+      sensors: { temperatureC: 55 },
+    };
+    const envelope = { ...sensorAnomaly, mqttDeviceId: sensorAnomaly.deviceId };
+
+    await processAnomalyRecord(JSON.stringify(envelope), validateSensorAnomaly);
+
+    const publishCalls = ebMock.commandCalls(PutEventsCommand);
+    const detail = JSON.parse(publishCalls[0]?.args[0].input.Entries?.[0]?.Detail ?? "{}");
+    expect(detail.severity).toBe("critical");
+  });
+
+  it("never includes severity in the EventBridge detail for a VISUAL_ANOMALY", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await processAnomalyRecord(JSON.stringify(validEnvelope), validateVisualAnomaly);
+
+    const publishCalls = ebMock.commandCalls(PutEventsCommand);
+    const detail = JSON.parse(publishCalls[0]?.args[0].input.Entries?.[0]?.Detail ?? "{}");
+    expect(detail).not.toHaveProperty("severity");
   });
 
   it("rejects a spoofed deviceId (topic pi-demo-01, payload pi-demo-02) with zero writes and zero EventBridge", async () => {

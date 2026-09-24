@@ -1,6 +1,7 @@
 import { App, Stack } from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as sns from "aws-cdk-lib/aws-sns";
 import * as events from "aws-cdk-lib/aws-events";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -71,6 +72,20 @@ function synth(): Template {
     sortKey: { name: "imageId", type: dynamodb.AttributeType.STRING },
   });
   const eventBus = new events.EventBus(stack, "Bus", { eventBusName: "SenseCare" });
+  const alertsTable = new dynamodb.Table(stack, "AlertsTable", {
+    partitionKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+  });
+  const caregiverAccessTable = new dynamodb.Table(stack, "CaregiverAccessTable", {
+    partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "deviceId", type: dynamodb.AttributeType.STRING },
+  });
+  caregiverAccessTable.addGlobalSecondaryIndex({
+    indexName: "CaregiverAccessByDevice",
+    partitionKey: { name: "deviceId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+  const alertsTopic = new sns.Topic(stack, "AlertsTopic");
 
   const queues = new EvidenceCallbackQueues(stack, "Queues");
   new EvidenceCallbackHandlers(stack, "Handlers", {
@@ -92,6 +107,9 @@ function synth(): Template {
     bedrockModelId: TEST_BEDROCK_MODEL_ID,
     bedrockInferenceProfileArn: TEST_BEDROCK_INFERENCE_PROFILE_ARN,
     bedrockFoundationModelArns: TEST_BEDROCK_FOUNDATION_MODEL_ARNS,
+    alertsTable,
+    caregiverAccessTable,
+    alertsTopic,
   });
 
   return Template.fromStack(stack);

@@ -308,12 +308,12 @@ Tablas:
 | `CareRecipients` | `recipientId` | Perfil mínimo, zona horaria y consentimientos granulares: `camera`, `voice` y `fallbackCall`. |
 | `Devices` | `deviceId` | Último contacto, estado, versión, configuración y `recipientId`. |
 | `Telemetry` | `deviceId` / `timestamp#eventId` | Historial de sensores. |
-| `Alerts` | `recipientId` / `createdAt#alertId` | Severidad, estado, evidencia y confirmación. |
+| `Alerts` | `caseId` (implementado, hito de alertas: sin SK, difiere del diseño conceptual original `recipientId`/`createdAt#alertId`) | Registro deduplicado de la alerta de un caso: `recipientId`, `deviceId`, `anomalyType`, `eventType`, `severity?`, `alertStatus` (`PENDING`/`SENT`/`FAILED`/`CANCELLED`/`ESCALATED`), `notifiedCaregiverIds`, `snsMessageId?`, timestamps y actor de `cancelledBy`/`escalatedBy`. Sin TTL: es trazabilidad funcional del caso. Ver `services/orchestration/src/dispatchAlertFn.ts` y `services/cases/src/alertDecision.ts`. |
 | `Observations` | `caseId` / `imageId` | Resultado visual estructurado de Bedrock Converse (implementado en Hito 4, tramo de analisis): `recipientId`, llave S3, campos cerrados (`riskIndicators`, `needsHumanReview`, `confidence`), `summary` narrativo, modelo/configuracion y timestamps. TTL sobre `ttlEpochSeconds` (~7 dias, igual al lifecycle de S3 de `raw-images/`), `RemovalPolicy.RETAIN`. Los mismos campos cerrados (sin `summary`) se copian ademas a `AnomalyCases.analysisStatus`/`analysisRiskIndicators`, que si es permanente. |
-| `AnomalyCases` | `caseId` | Estado, `executionArn`, evidencia, plazos, respuestas y resultado de escalamiento. |
+| `AnomalyCases` | `caseId` | Estado, `executionArn`, evidencia, plazos, respuestas y resultado de escalamiento. Hito de alertas: agrega `severity?`, `alertStatus`, `cancelledAt`/`cancelledBy`, `escalatedAt`/`escalatedBy` (espejo liviano de `Alerts`, mismo patrón que `analysisStatus`); `status` (ciclo de vida de Step Functions) nunca lo escriben las acciones humanas. |
 | `OpenCaseLocks` | `recipientId#anomalyType` | Candado de caso abierto, actualizado/liberado al resolver y protegido con TTL. |
-| `EventLog` | `caseId` / `timestamp#eventId` | Trazabilidad de decisiones, llamadas a herramientas y cambios de estado; sin foto, audio ni biometría cruda. |
-| `CaregiverAccess` | `userId` / `recipientId` | Relación de autorización uno-a-muchos, rol, prioridad y preferencias de alerta. |
+| `EventLog` | `caseId` / `timestamp#eventId` | Trazabilidad de decisiones, llamadas a herramientas y cambios de estado; sin foto, audio ni biometría cruda. Hito de alertas: también audita cada intento de `CANCEL_ALERT`/`ESCALATE` (aplicado, no-op o rechazado por conflicto). |
+| `CaregiverAccess` | `userId` / `deviceId` (implementado: por dispositivo emparejado, no por `recipientId`) | Relación de autorización uno-a-muchos otorgada por `POST /devices/{deviceId}/pair`. GSI `CaregiverAccessByDevice` (PK `deviceId`, hito de alertas): lista los `userId` emparejados a un dispositivo, usada solo para auditoría (`notifiedCaregiverIds`), no para dirigir la entrega de SNS. |
 
 Configuración:
 
@@ -469,14 +469,36 @@ SNS entrega alertas a usuarios o a otros sistemas.
 | Salida | Email, push, SMS opcional u otra Lambda. |
 | Necesidad | Recomendable; indispensable si se necesitan alertas inmediatas. |
 
-Configuración:
+Configuración implementada (hito de alertas: `DispatchAlertFn` en
+`services/orchestration/src/dispatchAlertFn.ts`, construida por
+`infra/lib/constructs/alerts-topic.ts`):
 
-- Topic: `SenseCare-alerts`.
-- Publicar sólo alertas deduplicadas.
-- Email confirmado para demo.
-- Push móvil para producción.
-- SMS sólo en casos críticos y con límite de gasto.
-- Separar topics de warning y critical si necesitan políticas distintas.
+- Dos topics, no uno: `SenseCare-Alerts` (familiares) y
+  `SenseCare-OperationalAlarms` (equipo técnico, alarma DLQ → SNS de la
+  sección 17/roadmap). Reutilizar el mismo topic mandaría ruido de
+  infraestructura a un familiar de demo.
+- Solo email (`subscriptions.EmailSubscription`); nunca SMS ni push en este
+  hito. Las suscripciones se confirman fuera del repositorio (SNS exige que
+  cada dirección confirme por correo, no se puede automatizar) o se pasan
+  como emails explícitos de stack (`ALERT_SUBSCRIPTION_EMAILS`/
+  `OPERATIONAL_SUBSCRIPTION_EMAILS`, nunca hardcodeados ni en git) — ver
+  `docs/ALERTS_AND_CASE_ACTIONS_RUNBOOK.md`.
+- Publicación deduplicada por `caseId`: `PutItem` condicional
+  `attribute_not_exists(caseId)` en `Alerts` es la única reserva atómica;
+  solo la invocación que gana esa condición llama a `sns:Publish`. La misma
+  Lambda se invoca en dos puntos de Step Functions (inmediato para sensor
+  crítico, red de seguridad al final del tramo de evidencia/análisis) —
+  cualquier invocación redundante es un no-op.
+- Mensaje mínimo y seguro: `caseId`, `eventType`, `anomalyType`,
+  `severity?`, `occurredAt` y una instrucción fija de demo. Nunca el
+  `summary` narrativo de Bedrock, `s3Key`/URLs, imágenes ni `recipientId`.
+- `sns:Publish` acotado al ARN exacto de `SenseCare-Alerts` en el rol de
+  `DispatchAlertFn`; nunca `sns:*` ni un topic comodín.
+- No hay entrega dirigida por caregiver individual: `notifiedCaregiverIds`
+  (poblado vía el GSI `CaregiverAccessByDevice` de `CaregiverAccess`) es
+  solo auditoría de quién estaba autorizado al momento de alertar, no una
+  lista de destinatarios reales de ese envío — ver limitación documentada
+  en el runbook.
 
 ---
 
@@ -525,7 +547,10 @@ GET  /me/recipients
 GET  /devices/{deviceId}/latest
 GET  /devices/{deviceId}/telemetry
 GET  /cases/{caseId}/events
+POST /cases/{caseId}/cancel
+POST /cases/{caseId}/escalate
 POST /demo/devices/{deviceId}/events
+POST /devices/{deviceId}/pair
 GET  /recipients/{recipientId}/dashboard
 GET  /recipients/{recipientId}/telemetry
 GET  /recipients/{recipientId}/alerts
@@ -537,6 +562,19 @@ GET  /recipients/{recipientId}/observations/{observationId}/image-url
 GET  /recipients/{recipientId}/consents
 PUT  /recipients/{recipientId}/consents
 ```
+
+Implementadas (Hito 5 + hito de alertas, `DemoIngestApi`/`CasesApi`, un solo
+HttpApi y un solo JWT authorizer de Cognito): `GET /devices/{deviceId}/latest`,
+`GET /devices/{deviceId}/telemetry`, `POST /devices/{deviceId}/pair`,
+`POST /demo/devices/{deviceId}/events`, `GET /cases/{caseId}/events`,
+`POST /cases/{caseId}/cancel` (`CANCEL_ALERT`), `POST /cases/{caseId}/escalate`
+(`ESCALATE`, solo registra la intención humana — sin `EscalationPolicy`/
+Connect todavía). El resto de la lista (dashboard, consentimientos,
+check-in de voz) sigue pendiente. `cancel`/`escalate` resuelven
+`caseId -> deviceId` vía `AnomalyCases` y autorizan con `CaregiverAccess`
+(por dispositivo emparejado, no por `recipientId`); ver
+`services/cases/src/decisionHandlerCore.ts` y
+`docs/ALERTS_AND_CASE_ACTIONS_RUNBOOK.md`.
 
 Configuración:
 
@@ -705,6 +743,9 @@ IAM define permisos. KMS controla llaves de cifrado.
 | voiceCheckinHandler | Firmar audio, iniciar Transcribe y devolver resultado al `caseId`. |
 | apiHandler | Acceder sólo a tablas necesarias y firmar URLs S3. |
 | captureEvidence | Firmar la subida necesaria y publicar sólo `UPLOAD_EVIDENCE` al topic de la Pi indicada. |
+| `dispatchAlertFn` (implementado) | `sns:Publish` acotado al ARN exacto de `SenseCare-Alerts`; `dynamodb:Query` solo sobre el GSI `CaregiverAccessByDevice`; lectura/escritura de `Alerts`; `UpdateItem` en `AnomalyCases` (espejo de `alertStatus`). Sin S3, Bedrock ni Connect. |
+| `cancelCaseFn` / `escalateCaseFn` (implementado) | `dynamodb:GetItem` en `AnomalyCases`/`CaregiverAccess`, `dynamodb:TransactWriteItems` acotado a `AnomalyCases`+`Alerts`, `PutItem` en `EventLog`. Nunca `sns:Publish`: no envían nada, solo registran una decisión humana. |
+| `getCaseEventsFn` (implementado) | `dynamodb:GetItem` en `AnomalyCases`/`CaregiverAccess`, `dynamodb:Query` en `EventLog`. Solo lectura. |
 | decisionAgent | Invocar Bedrock y el despachador de herramientas; no puede invocar Connect ni resolver un caso. |
 | escalationPolicy | Leer caso, consentimientos y respuestas; sólo puede solicitar `EmergencyDialer`. |
 | emergencyDialer | `connect:StartOutboundVoiceContact` para la instancia, flujo y destinos permitidos. |

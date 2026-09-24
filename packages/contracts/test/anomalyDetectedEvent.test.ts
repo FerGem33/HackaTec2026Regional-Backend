@@ -53,4 +53,30 @@ describe("AnomalyDetectedEventDetail schema", () => {
       false,
     );
   });
+
+  it("accepts a SENSOR_ANOMALY detail with a critical severity", () => {
+    expect(
+      validateAnomalyDetectedEvent({
+        ...baseValid,
+        eventType: "SENSOR_ANOMALY",
+        anomalyType: "TEMPERATURE_ALERT",
+        severity: "critical",
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts a VISUAL_ANOMALY detail without severity (optional field)", () => {
+    expect(validateAnomalyDetectedEvent(baseValid)).toBe(true);
+  });
+
+  it("rejects a severity value outside the closed enum", () => {
+    expect(
+      validateAnomalyDetectedEvent({
+        ...baseValid,
+        eventType: "SENSOR_ANOMALY",
+        anomalyType: "TEMPERATURE_ALERT",
+        severity: "extreme",
+      }),
+    ).toBe(false);
+  });
 });

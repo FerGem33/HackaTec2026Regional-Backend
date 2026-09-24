@@ -65,4 +65,21 @@ describe("upsertAnomalyCaseFn", () => {
 
     await expect(handler(input)).rejects.toThrow("transient");
   });
+
+  it("persists severity when present (SENSOR_ANOMALY) and omits it when absent (VISUAL_ANOMALY)", async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    await handler({
+      ...input,
+      caseDetail: { ...input.caseDetail, eventType: "SENSOR_ANOMALY", anomalyType: "TEMPERATURE_ALERT", severity: "critical" },
+    });
+    const withSeverity = ddbMock.commandCalls(PutCommand)[0]?.args[0].input;
+    expect(withSeverity?.Item?.severity).toBe("critical");
+
+    ddbMock.reset();
+    ddbMock.on(PutCommand).resolves({});
+    await handler(input); // VISUAL_ANOMALY, sin severity
+    const withoutSeverity = ddbMock.commandCalls(PutCommand)[0]?.args[0].input;
+    expect(withoutSeverity?.Item).not.toHaveProperty("severity");
+  });
 });

@@ -48,7 +48,8 @@
         "POSSIBLE_FIRE"
       ]
     },
-    "occurredAt": { "$ref": "#/$defs/utcTimestamp" }
+    "occurredAt": { "$ref": "#/$defs/utcTimestamp" },
+    "severity": { "type": "string", "enum": ["warning", "critical"] }
   },
   "required": [
     "caseId",

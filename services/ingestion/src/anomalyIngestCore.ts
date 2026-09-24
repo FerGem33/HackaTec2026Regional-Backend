@@ -194,6 +194,11 @@ async function tryPublishWithLease(
             eventType: anomaly.eventType,
             anomalyType: anomaly.anomalyType,
             occurredAt: anomaly.occurredAt,
+            // Solo SensorAnomaly trae severity (VisualAnomaly no); antes de
+            // este hito de alertas se descartaba aqui pese a existir en el
+            // payload de borde, dejando a CaseOrchestration sin forma de
+            // saber si un sensor critico debia alertar sin esperar evidencia.
+            ...(anomaly.eventType === "SENSOR_ANOMALY" ? { severity: anomaly.severity } : {}),
           } satisfies AnomalyDetectedEventDetail),
         },
       ],

@@ -12,6 +12,16 @@ import { Construct } from "constructs";
  *
  * RemovalPolicy.RETAIN: un `cdk destroy` no debe borrar a quien ya
  * empareja su dispositivo.
+ *
+ * GSI `CaregiverAccessByDevice` (PK deviceId, Hito de alertas): la tabla
+ * base solo responde "¿este userId tiene acceso a este deviceId?" en O(1).
+ * DispatchAlertFn necesita la pregunta inversa -- "¿que usuarios estan
+ * emparejados con el deviceId de este caso?" -- para poblar la auditoria
+ * `notifiedCaregiverIds` de Alerts sin un Scan. La entrega real de SNS
+ * sigue siendo un solo topic con suscripciones configuradas fuera de este
+ * repositorio (ver dispatchAlertFn.ts); este GSI es solo para auditoria de
+ * quien estaba autorizado al momento de alertar, no para direccionar el
+ * envio por caregiver.
  */
 export class CaregiverAccessTable extends Construct {
   public readonly table: dynamodb.Table;
@@ -25,6 +35,13 @@ export class CaregiverAccessTable extends Construct {
       sortKey: { name: "deviceId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.table.addGlobalSecondaryIndex({
+      indexName: "CaregiverAccessByDevice",
+      partitionKey: { name: "deviceId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
     });
   }
 }

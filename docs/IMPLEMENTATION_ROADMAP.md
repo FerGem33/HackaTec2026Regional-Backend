@@ -184,16 +184,63 @@ Agregar `deviceWatchdog` programado cada minuto para detectar falta de telemetr�
 - Aislar `POST /demo/devices/{deviceId}/events` con grupo `demo-operator`, rate limit y allowlist; no permite comandos ni acceso a dispositivos de producción.
 - Para esta versión, los consentimientos se cargan como datos de prueba y sólo se consultan/validan en el flujo. La pantalla para que el usuario los modifique queda explícitamente fuera de alcance.
 
+**Estado:** completo. `GET/POST /devices/{deviceId}/{latest,telemetry,pair}` y
+`POST /demo/devices/{deviceId}/events` implementadas desde antes;
+`GET /cases/{caseId}/events`, `POST /cases/{caseId}/cancel` y
+`POST /cases/{caseId}/escalate` implementadas junto con el hito de alertas
+(ver más abajo) — autorizan resolviendo `caseId -> deviceId` vía
+`AnomalyCases` y verificando `CaregiverAccess`, no un `recipientId` de
+`CareRecipients` (esa tabla no existe todavía).
+
 **Criterio de salida:** un familiar de prueba autorizado puede cancelar por API/CLI; otro usuario recibe `403`; la decisión y el actor aparecen en `EventLog`.
+
+### Hito de alertas — SNS deduplicado y acciones humanas (implementado)
+
+**Objetivo:** avisar a los familiares autorizados sin duplicar envíos, y dejar
+`CANCEL_ALERT`/`ESCALATE` disponibles para el flujo humano, antes de
+construir el fallback telefónico.
+
+- `DispatchAlertFn` (`services/orchestration/src/dispatchAlertFn.ts`),
+  invocada en dos puntos de `CaseOrchestration`: inmediato tras abrir el
+  caso si es un sensor crítico (sin esperar evidencia ni Bedrock), y como
+  red de seguridad al final del tramo de evidencia/análisis para el resto.
+  Dedup real vía `PutItem` condicional en la nueva tabla `Alerts` (PK
+  `caseId`): solo la invocación que gana esa condición publica a SNS.
+- Dos topics SNS (`SenseCare-Alerts` para familiares,
+  `SenseCare-OperationalAlarms` para la alarma DLQ del punto siguiente); solo
+  email, sin SMS/push.
+- 6 alarmas CloudWatch (una por DLQ crítica ya existente) publicando a
+  `SenseCare-OperationalAlarms` — cumple el pendiente de "alarma mínima de
+  DLQ → SNS" mencionado en `ARCHITECTURE.md`.
+- `GET /cases/{caseId}/events`, `POST /cases/{caseId}/cancel`,
+  `POST /cases/{caseId}/escalate` (`services/cases/`), en el mismo HttpApi y
+  JWT de Cognito que el resto del Hito 5. Decisión atómica y determinista
+  (`TransactWriteItems` sobre `AnomalyCases`+`Alerts`): repetir la misma
+  acción es idempotente (200); la acción contraria que pierde la carrera
+  recibe `409` con el estado real. Todo intento se audita en `EventLog`.
+- GSI `CaregiverAccessByDevice` sobre `CaregiverAccess` (auditoría de a
+  quién se consideró notificado, no direcciona la entrega real de SNS).
+- Límites explícitos de este hito: `ESCALATE` solo registra la intención
+  humana, no dispara ninguna llamada; `CANCEL_ALERT` no detiene ningún
+  fallback todavía porque el Hito 6 (más abajo) no existe aún.
+
+**Criterio de salida:** una anomalía repetida o un reintento de Lambda nunca
+produce dos correos para el mismo caso; un fallo de SNS deja el caso
+auditado como `FAILED` sin bloquear evidencia/análisis; ver
+`docs/ALERTS_AND_CASE_ACTIONS_RUNBOOK.md` para el procedimiento de prueba
+completo.
 
 ### Hito 6 — Notificaciones y llamada de último recurso
 
 **Objetivo:** comprobar la parte más delicada antes del ensayo final.
 
-- Configurar SNS para enviar el aviso inicial a los contactos demo y verificar cada suscripción.
+- SNS de aviso inicial ya implementado en el hito de alertas (arriba);
+  este hito se reduce a la telefonía real.
 - Configurar un contact flow de Connect breve, explícitamente identificado como demo y con instrucciones de contacto.
 - Ejecutar una prueba aislada del `EmergencyDialer` con un `caseId` de prueba y el teléfono permitido. Verificar que un segundo intento con el mismo `caseId` no vuelve a llamar.
 - Probar negativos: consentimiento de fallback revocado, destino fuera de allowlist, caso cancelado y caso ya llamado. Todos deben bloquear la llamada y dejar un evento auditable.
+- Extender `CANCEL_ALERT` (ya implementado) para que efectivamente detenga
+  el fallback de este hito una vez que exista.
 
 **Criterio de salida:** la llamada real llega sólo al teléfono de prueba y ningún camino de la API/LLM permite escoger un número arbitrario.
 

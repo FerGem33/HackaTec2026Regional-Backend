@@ -9,6 +9,7 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as sns from "aws-cdk-lib/aws-sns";
 import { Construct } from "constructs";
 import * as path from "node:path";
 
@@ -21,6 +22,11 @@ export interface CaseOrchestrationProps {
   eventLogTable: dynamodb.ITable;
   evidenceBucket: s3.IBucket;
   observationsTable: dynamodb.ITable;
+  // --- Hito de alertas ---
+  alertsTable: dynamodb.ITable;
+  // Debe exponer el GSI "CaregiverAccessByDevice" (ver caregiver-access-table.ts).
+  caregiverAccessTable: dynamodb.ITable;
+  alertsTopic: sns.ITopic;
   // Sin default: el operador debe verificar disponibilidad/acceso real del
   // modelo (aws bedrock list-foundation-models/list-inference-profiles,
   // solo lectura) antes de desplegar. bedrockModelId es el valor que se
@@ -73,6 +79,7 @@ const ANALYSIS_ENTRY_ROOT = path.resolve(__dirname, "..", "..", "..", "services"
 export class CaseOrchestration extends Construct {
   public readonly stateMachine: sfn.StateMachine;
   public readonly caseDispatcherFn: lambdaNodejs.NodejsFunction;
+  public readonly dispatcherDlq: sqs.Queue;
 
   constructor(scope: Construct, id: string, props: CaseOrchestrationProps) {
     super(scope, id);
@@ -112,6 +119,31 @@ export class CaseOrchestration extends Construct {
       environment: taskEnvironment,
     });
     props.anomalyCasesTable.grant(upsertAnomalyCaseFn, "dynamodb:PutItem", "dynamodb:UpdateItem");
+
+    // --- Task Lambda: despacho de alertas (hito de alertas) ---
+    // Una sola Lambda, invocada en DOS puntos de la maquina de estados (ver
+    // mas abajo): inmediato para sensor critico, y como red de seguridad al
+    // final del tramo de evidencia/analisis. La idempotencia vive dentro de
+    // la propia Lambda (PutItem condicional en Alerts), no en la maquina.
+    const dispatchAlertFn = new lambdaNodejs.NodejsFunction(this, "DispatchAlertFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-dispatchAlert",
+      entry: path.join(ORCHESTRATION_ENTRY_ROOT, "dispatchAlertFn.ts"),
+      environment: {
+        ALERTS_TABLE_NAME: props.alertsTable.tableName,
+        CAREGIVER_ACCESS_TABLE_NAME: props.caregiverAccessTable.tableName,
+        ANOMALY_CASES_TABLE_NAME: props.anomalyCasesTable.tableName,
+        ALERTS_TOPIC_ARN: props.alertsTopic.topicArn,
+      },
+    });
+    props.alertsTable.grantReadWriteData(dispatchAlertFn);
+    props.anomalyCasesTable.grant(dispatchAlertFn, "dynamodb:UpdateItem");
+    // Solo lectura del GSI inverso (deviceId -> userIds emparejados) para
+    // poblar la auditoria notifiedCaregiverIds; nunca escribe en esta tabla.
+    props.caregiverAccessTable.grant(dispatchAlertFn, "dynamodb:Query");
+    // sns:Publish acotado al ARN exacto del topic de alertas, nunca sns:*
+    // ni un topic comodin.
+    props.alertsTopic.grantPublish(dispatchAlertFn);
 
     // --- Task Lambdas: tramo de evidencia ---
 
@@ -323,6 +355,37 @@ export class CaseOrchestration extends Construct {
       },
     });
 
+    // --- Alerta inmediata para sensor critico (hito de alertas) ---
+    // "$" en este punto de la cadena sigue siendo el detalle plano de la
+    // anomalia (renewLockTask/upsertCaseTask descartan su propio resultado
+    // via resultPath: DISCARD), asi que la condicion lee $.eventType/
+    // $.severity directamente, no $.caseDetail.eventType.
+    const dispatchAlertImmediateTask = new tasks.LambdaInvoke(this, "DispatchAlertImmediate", {
+      lambdaFunction: dispatchAlertFn,
+      payload: taskPayload,
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+      retryOnServiceExceptions: true,
+    });
+    // Un fallo de invocacion del propio Lambda (no del envio de SNS, que
+    // dispatchAlertFn ya atrapa internamente) nunca debe bloquear el tramo
+    // de evidencia: se ignora y se continua igual.
+    dispatchAlertImmediateTask.addCatch(prepareEvidencePhase, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.alertError",
+    });
+    dispatchAlertImmediateTask.next(prepareEvidencePhase);
+
+    const classifySeverityChoice = new sfn.Choice(this, "ClassifySeverity")
+      .when(
+        sfn.Condition.and(
+          sfn.Condition.stringEquals("$.eventType", "SENSOR_ANOMALY"),
+          sfn.Condition.stringEquals("$.severity", "critical"),
+        ),
+        dispatchAlertImmediateTask,
+      )
+      .otherwise(prepareEvidencePhase);
+
     const evidenceRecordingFailed = new sfn.Fail(this, "EvidenceOutcomeRecordingFailed", {
       error: "EvidenceOutcomeRecordingFailed",
       cause: "No se pudo registrar el resultado final de evidencia; revisar CloudWatch Logs y EventLog.",
@@ -348,6 +411,32 @@ export class CaseOrchestration extends Construct {
 
     const caseAnalysisPhaseComplete = new sfn.Succeed(this, "CaseAnalysisPhaseComplete");
 
+    // --- Red de seguridad de alertas (hito de alertas) ---
+    // Se llega aqui por dos caminos: evidencia disponible ya analizada
+    // (recordAnalysisOutcomeTask) o evidencia SKIPPED_NO_CONSENT/INCOMPLETE/
+    // ERROR (evidenceAvailableChoice.otherwise, mas abajo). En ambos "$"
+    // trae { caseDetail, executionArn, ... } anidado, nunca el detalle
+    // plano -- a diferencia de DispatchAlertImmediate, que corre antes de
+    // PrepareEvidencePhase. Es la MISMA Lambda que DispatchAlertImmediate:
+    // si el sensor critico ya alerto arriba, esta invocacion es un no-op
+    // idempotente (ver dispatchAlertFn.ts); si no, alerta ahora, sin haber
+    // bloqueado nunca la evidencia/analisis que ya corrieron primero.
+    const notifyCaregiversIfNotAlreadyTask = new tasks.LambdaInvoke(this, "NotifyCaregiversIfNotAlready", {
+      lambdaFunction: dispatchAlertFn,
+      payload: sfn.TaskInput.fromObject({
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+      }),
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+      retryOnServiceExceptions: true,
+    });
+    notifyCaregiversIfNotAlreadyTask.addCatch(caseAnalysisPhaseComplete, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.alertError",
+    });
+    notifyCaregiversIfNotAlreadyTask.next(caseAnalysisPhaseComplete);
+
     const analysisRecordingFailed = new sfn.Fail(this, "AnalysisOutcomeRecordingFailed", {
       error: "AnalysisOutcomeRecordingFailed",
       cause: "No se pudo registrar el resultado de analisis; revisar CloudWatch Logs y EventLog.",
@@ -368,7 +457,7 @@ export class CaseOrchestration extends Construct {
       errors: [sfn.Errors.ALL],
       resultPath: "$.error",
     });
-    recordAnalysisOutcomeTask.next(caseAnalysisPhaseComplete);
+    recordAnalysisOutcomeTask.next(notifyCaregiversIfNotAlreadyTask);
 
     const prepareAnalysisOutcome = new sfn.Pass(this, "PrepareAnalysisOutcome", {
       parameters: {
@@ -494,7 +583,7 @@ export class CaseOrchestration extends Construct {
 
     const evidenceAvailableChoice = new sfn.Choice(this, "EvidenceAvailable?")
       .when(sfn.Condition.stringEquals("$.evidenceStatus", "AVAILABLE"), analyzeEvidenceTask)
-      .otherwise(caseAnalysisPhaseComplete);
+      .otherwise(notifyCaregiversIfNotAlreadyTask);
 
     recordOutcomeTask.next(evidenceAvailableChoice);
 
@@ -608,11 +697,10 @@ export class CaseOrchestration extends Construct {
       .when(cameraConsentGranted, requestEvidenceUploadTask)
       .otherwise(mapToSkippedNoConsent);
 
-    const definition = renewLockTask
-      .next(upsertCaseTask)
-      .next(prepareEvidencePhase)
-      .next(checkCameraConsentTask)
-      .next(cameraConsentChoice);
+    prepareEvidencePhase.next(checkCameraConsentTask);
+    checkCameraConsentTask.next(cameraConsentChoice);
+
+    const definition = renewLockTask.next(upsertCaseTask).next(classifySeverityChoice);
 
     this.stateMachine = new sfn.StateMachine(this, "SenseCareCaseStateMachine", {
       stateMachineName: "SenseCare-CaseStateMachine",
@@ -635,7 +723,7 @@ export class CaseOrchestration extends Construct {
     });
     this.stateMachine.grantStartExecution(this.caseDispatcherFn);
 
-    const dispatcherDlq = new sqs.Queue(this, "CaseDispatcherDlq", {
+    this.dispatcherDlq = new sqs.Queue(this, "CaseDispatcherDlq", {
       queueName: "SenseCare-case-dispatcher-dlq",
       retentionPeriod: cdk.Duration.days(14),
       encryption: sqs.QueueEncryption.SQS_MANAGED,
@@ -650,7 +738,7 @@ export class CaseOrchestration extends Construct {
       },
       targets: [
         new targets.LambdaFunction(this.caseDispatcherFn, {
-          deadLetterQueue: dispatcherDlq,
+          deadLetterQueue: this.dispatcherDlq,
           retryAttempts: 3,
         }),
       ],

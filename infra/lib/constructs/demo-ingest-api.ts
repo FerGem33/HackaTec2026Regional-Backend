@@ -55,6 +55,8 @@ export class DemoIngestApi extends Construct {
   public readonly getLatestFn: lambdaNodejs.NodejsFunction;
   public readonly getTelemetryFn: lambdaNodejs.NodejsFunction;
   public readonly pairDeviceFn: lambdaNodejs.NodejsFunction;
+  /** Reutilizado por CasesApi para proteger sus 3 rutas con el mismo JWT. */
+  public readonly authorizer: apigwv2.IHttpRouteAuthorizer;
 
   constructor(scope: Construct, id: string, props: DemoApiProps) {
     super(scope, id);
@@ -111,6 +113,7 @@ export class DemoIngestApi extends Construct {
     const authorizer = new HttpJwtAuthorizer("DemoJwtAuthorizer", props.userPool.userPoolProviderUrl, {
       jwtAudience: [props.userPoolClient.userPoolClientId],
     });
+    this.authorizer = authorizer;
 
     this.httpApi = new apigwv2.HttpApi(this, "DemoIngestHttpApi", {
       apiName: "SenseCare-demo-api",

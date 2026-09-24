@@ -1,6 +1,7 @@
 import { App, Stack } from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as sns from "aws-cdk-lib/aws-sns";
 import * as events from "aws-cdk-lib/aws-events";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -78,6 +79,20 @@ function synth(): { template: Template; stack: Stack } {
     sortKey: { name: "imageId", type: dynamodb.AttributeType.STRING },
   });
   const eventBus = new events.EventBus(stack, "Bus", { eventBusName: "SenseCare" });
+  const alertsTable = new dynamodb.Table(stack, "AlertsTable", {
+    partitionKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+  });
+  const caregiverAccessTable = new dynamodb.Table(stack, "CaregiverAccessTable", {
+    partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "deviceId", type: dynamodb.AttributeType.STRING },
+  });
+  caregiverAccessTable.addGlobalSecondaryIndex({
+    indexName: "CaregiverAccessByDevice",
+    partitionKey: { name: "deviceId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "userId", type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+  const alertsTopic = new sns.Topic(stack, "AlertsTopic");
 
   new CaseOrchestration(stack, "CaseOrchestration", {
     eventBus,
@@ -93,6 +108,9 @@ function synth(): { template: Template; stack: Stack } {
     bedrockModelId: TEST_BEDROCK_MODEL_ID,
     bedrockInferenceProfileArn: TEST_BEDROCK_INFERENCE_PROFILE_ARN,
     bedrockFoundationModelArns: TEST_BEDROCK_FOUNDATION_MODEL_ARNS,
+    alertsTable,
+    caregiverAccessTable,
+    alertsTopic,
   });
 
   return { template: Template.fromStack(stack), stack };
@@ -131,13 +149,14 @@ describe("CaseOrchestration", () => {
     }
   });
 
-  it("creates exactly the 7 task Lambdas invoked by the state machine", () => {
+  it("creates exactly the 8 task Lambdas invoked by the state machine", () => {
     const { template } = synth();
     const functions = template.findResources("AWS::Lambda::Function");
-    // 7 tasks (renew, upsert, cameraConsent, requestEvidenceUpload,
-    // recordEvidenceOutcome, analyzeEvidence, recordAnalysisOutcome) + el
-    // dispatcher de EventBridge = 8.
-    expect(Object.keys(functions)).toHaveLength(8);
+    // 8 tasks (renew, upsert, dispatchAlert, cameraConsent,
+    // requestEvidenceUpload, recordEvidenceOutcome, analyzeEvidence,
+    // recordAnalysisOutcome -- dispatchAlert se invoca dos veces en la
+    // maquina pero es un unico Lambda) + el dispatcher de EventBridge = 9.
+    expect(Object.keys(functions)).toHaveLength(9);
   });
 
   it("wires the registration phase (RenewOpenCaseLock -> UpsertAnomalyCase) with Retry and a Catch to CaseRegistrationFailed", () => {
@@ -163,13 +182,33 @@ describe("CaseOrchestration", () => {
 
     const upsert = definition.States.UpsertAnomalyCase;
     expect(upsert?.Type).toBe("Task");
-    expect(upsert?.Next).toBe("PrepareEvidencePhase");
+    expect(upsert?.Next).toBe("ClassifySeverity");
     expect(upsert?.Catch?.[0]).toMatchObject({
       ErrorEquals: ["States.ALL"],
       Next: "CaseRegistrationFailed",
     });
 
     expect(definition.States.CaseRegistrationFailed?.Type).toBe("Fail");
+  });
+
+  it("ClassifySeverity: a critical sensor anomaly dispatches an alert immediately, before evidence; anything else skips straight to evidence", () => {
+    const { template } = synth();
+    const definition = parseStateMachineDefinition(template);
+
+    const classify = definition.States.ClassifySeverity;
+    expect(classify?.Type).toBe("Choice");
+    expect(classify?.Choices?.[0]).toMatchObject({ Next: "DispatchAlertImmediate" });
+    expect(classify?.Default).toBe("PrepareEvidencePhase");
+
+    const dispatchImmediate = definition.States.DispatchAlertImmediate;
+    expect(dispatchImmediate?.Type).toBe("Task");
+    expect(dispatchImmediate?.Next).toBe("PrepareEvidencePhase");
+    // Un fallo de invocacion del propio Lambda nunca debe bloquear el
+    // tramo de evidencia: cae al mismo destino que el camino exitoso.
+    expect(dispatchImmediate?.Catch?.[0]).toMatchObject({
+      ErrorEquals: ["States.ALL"],
+      Next: "PrepareEvidencePhase",
+    });
   });
 
   it("checks camera consent and branches: granted -> RequestEvidenceUpload, denied -> MapToSkippedNoConsent", () => {
@@ -279,7 +318,7 @@ describe("CaseOrchestration", () => {
     });
   });
 
-  it("scopes the state machine's execution role to exactly the seven task Lambda ARNs (no wildcard function resource)", () => {
+  it("scopes the state machine's execution role to exactly the eight task Lambda ARNs (no wildcard function resource)", () => {
     const { template } = synth();
     const roles = template.findResources("AWS::IAM::Role");
     const [stateMachineRoleId] = Object.entries(roles)
@@ -306,7 +345,8 @@ describe("CaseOrchestration", () => {
     // Cada Task otorga su propio grantInvoke (Arn + Arn:* para alias), sin
     // fusionarse en un unico statement; se cuentan los ARNs base distintos
     // (Fn::GetAtt directo, sin el sufijo ":*" de alias) para verificar que
-    // son exactamente las 7 Lambdas de tarea, ninguna de mas ni de menos.
+    // son exactamente las 8 Lambdas de tarea, ninguna de mas ni de menos
+    // (dispatchAlertFn cuenta una sola vez pese a invocarse dos veces).
     const baseArnKeys = new Set(
       invokeStatements.flatMap((s) => {
         const resources = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
@@ -319,7 +359,7 @@ describe("CaseOrchestration", () => {
       }),
     );
 
-    expect(baseArnKeys.size).toBe(7);
+    expect(baseArnKeys.size).toBe(8);
   });
 
   it("gives renewOpenCaseLockFn only dynamodb:UpdateItem on OpenCaseLocks", () => {
@@ -380,6 +420,45 @@ describe("CaseOrchestration", () => {
     expect(updateOnlyStatements.length).toBeGreaterThanOrEqual(3);
   });
 
+  it("gives dispatchAlertFn sns:Publish scoped to the exact Alerts topic, dynamodb:Query for CaregiverAccessByDevice, and no S3/Bedrock/Connect permissions", () => {
+    const { template } = synth();
+    const statements = policyStatements(template);
+
+    const snsStatement = statements.find((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.length === 1 && actions[0] === "sns:Publish";
+    });
+    expect(snsStatement).toBeDefined();
+    expect(snsStatement?.Resource).not.toBe("*");
+
+    const queryStatement = statements.find((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.length === 1 && actions[0] === "dynamodb:Query";
+    });
+    expect(queryStatement).toBeDefined();
+
+    // dispatchAlertFn es la UNICA Lambda de este construct con sns:Publish:
+    // se identifica su propia policy por esa marca distintiva, en vez de
+    // barrer todas las policies del template (requestEvidenceUploadFn/
+    // analyzeEvidenceFn si tienen S3/Bedrock legitimamente en las suyas).
+    const policies = template.findResources("AWS::IAM::Policy");
+    const dispatchAlertPolicy = Object.values(policies).find((p) => {
+      const policyStatementsForFn = (
+        p as { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown }> } } }
+      ).Properties.PolicyDocument.Statement;
+      return policyStatementsForFn.some((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes("sns:Publish");
+      });
+    }) as { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown }> } } };
+    expect(dispatchAlertPolicy).toBeDefined();
+
+    const ownActions = JSON.stringify(dispatchAlertPolicy.Properties.PolicyDocument.Statement);
+    expect(ownActions).not.toContain("s3:");
+    expect(ownActions).not.toContain("bedrock:");
+    expect(ownActions).not.toContain("connect:");
+  });
+
   it("gives caseDispatcherFn only states:StartExecution, scoped to the one state machine", () => {
     const { template } = synth();
     const statements = policyStatements(template);
@@ -410,8 +489,8 @@ describe("CaseOrchestration", () => {
     // A diferencia de evidence-callback-handlers.ts (que SI necesita
     // Resource:"*" para states:SendTaskSuccess/Failure, la unica excepcion
     // documentada del paquete), esta construccion no llama SendTask* en
-    // absoluto: sus 5 Lambdas de tarea solo leen/escriben DynamoDB, S3 e
-    // iot:Publish, todo escopado a ARNs/prefijos concretos.
+    // absoluto: sus Lambdas de tarea solo leen/escriben DynamoDB, S3,
+    // iot:Publish y sns:Publish, todo escopado a ARNs/prefijos concretos.
     const { template } = synth();
     const statements = policyStatements(template);
 
@@ -421,6 +500,7 @@ describe("CaseOrchestration", () => {
       expect(JSON.stringify(actions)).not.toContain("dynamodb:*");
       expect(JSON.stringify(actions)).not.toContain("states:*");
       expect(JSON.stringify(actions)).not.toContain("s3:*");
+      expect(JSON.stringify(actions)).not.toContain("sns:*");
       expect(statement.Resource).not.toBe("*");
     }
 
@@ -431,7 +511,7 @@ describe("CaseOrchestration", () => {
     );
   });
 
-  it("branches on EvidenceAvailable?: AVAILABLE -> AnalyzeEvidence, otherwise -> CaseAnalysisPhaseComplete directly", () => {
+  it("branches on EvidenceAvailable?: AVAILABLE -> AnalyzeEvidence, otherwise -> NotifyCaregiversIfNotAlready (never bypasses the alerting safety net)", () => {
     const { template } = synth();
     const definition = parseStateMachineDefinition(template);
 
@@ -443,7 +523,16 @@ describe("CaseOrchestration", () => {
       Variable: "$.evidenceStatus",
       Next: "AnalyzeEvidence",
     });
-    expect(choice?.Default).toBe("CaseAnalysisPhaseComplete");
+    expect(choice?.Default).toBe("NotifyCaregiversIfNotAlready");
+
+    const notify = definition.States.NotifyCaregiversIfNotAlready;
+    expect(notify?.Type).toBe("Task");
+    expect(notify?.Next).toBe("CaseAnalysisPhaseComplete");
+    // Un fallo de invocacion nunca debe impedir que la ejecucion concluya.
+    expect(notify?.Catch?.[0]).toMatchObject({
+      ErrorEquals: ["States.ALL"],
+      Next: "CaseAnalysisPhaseComplete",
+    });
   });
 
   it("wires AnalyzeEvidence with Retry only for Bedrock-transient errors and 4 distinct Catch branches with fixed failureReason literals", () => {
@@ -509,7 +598,7 @@ describe("CaseOrchestration", () => {
     }
   });
 
-  it("converges every analysis outcome into RecordAnalysisOutcome -> CaseAnalysisPhaseComplete, with a Fail state as the last resort", () => {
+  it("converges every analysis outcome into RecordAnalysisOutcome -> NotifyCaregiversIfNotAlready -> CaseAnalysisPhaseComplete, with a Fail state as the last resort", () => {
     const { template } = synth();
     const definition = parseStateMachineDefinition(template);
 
@@ -518,12 +607,13 @@ describe("CaseOrchestration", () => {
 
     const recordAnalysis = definition.States.RecordAnalysisOutcome;
     expect(recordAnalysis?.Type).toBe("Task");
-    expect(recordAnalysis?.Next).toBe("CaseAnalysisPhaseComplete");
+    expect(recordAnalysis?.Next).toBe("NotifyCaregiversIfNotAlready");
     expect(recordAnalysis?.Catch?.[0]).toMatchObject({
       ErrorEquals: ["States.ALL"],
       Next: "AnalysisOutcomeRecordingFailed",
     });
 
+    expect(definition.States.NotifyCaregiversIfNotAlready?.Next).toBe("CaseAnalysisPhaseComplete");
     expect(definition.States.CaseAnalysisPhaseComplete?.Type).toBe("Succeed");
     expect(definition.States.AnalysisOutcomeRecordingFailed?.Type).toBe("Fail");
   });

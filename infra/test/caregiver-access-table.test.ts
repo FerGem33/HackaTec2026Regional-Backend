@@ -26,4 +26,20 @@ describe("CaregiverAccessTable", () => {
     const template = synth();
     template.hasResource("AWS::DynamoDB::Table", { DeletionPolicy: "Retain" });
   });
+
+  it("exposes the CaregiverAccessByDevice GSI (deviceId PK, userId SK) for the reverse deviceId -> userIds lookup", () => {
+    const template = synth();
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      GlobalSecondaryIndexes: [
+        {
+          IndexName: "CaregiverAccessByDevice",
+          KeySchema: [
+            { AttributeName: "deviceId", KeyType: "HASH" },
+            { AttributeName: "userId", KeyType: "RANGE" },
+          ],
+          Projection: { ProjectionType: "KEYS_ONLY" },
+        },
+      ],
+    });
+  });
 });

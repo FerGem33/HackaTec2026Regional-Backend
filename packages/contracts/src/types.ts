@@ -163,6 +163,13 @@ export type AnomalyDetectedAnomalyType = VisualAnomalyType | SensorAnomalyType;
  * (productor) y @sensecare/orchestration (consumidor, Hito 4).
  * caseDispatcherFn valida este detalle contra el schema antes de
  * StartExecution.
+ *
+ * `severity` (Hito de alertas): solo tiene sentido para
+ * eventType === "SENSOR_ANOMALY" (espejo de SensorAnomaly.severity, que
+ * anomalyIngestCore descartaba antes de este hito). Ausente para
+ * VISUAL_ANOMALY. Permite a CaseOrchestration decidir, sin esperar
+ * evidencia ni Bedrock, si una anomalia de sensor es lo bastante critica
+ * para alertar de inmediato.
  */
 export interface AnomalyDetectedEventDetail {
   caseId: CaseId;
@@ -172,4 +179,5 @@ export interface AnomalyDetectedEventDetail {
   eventType: AnomalyDetectedEventType;
   anomalyType: AnomalyDetectedAnomalyType;
   occurredAt: Iso8601Utc;
+  severity?: "warning" | "critical";
 }

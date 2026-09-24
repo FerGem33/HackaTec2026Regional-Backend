@@ -21,6 +21,10 @@ import { DeviceAccessPolicy } from "./constructs/device-access-policy";
 import { DemoAuth } from "./constructs/demo-auth";
 import { DemoIngestApi } from "./constructs/demo-ingest-api";
 import { CaregiverAccessTable } from "./constructs/caregiver-access-table";
+import { AlertsTable } from "./constructs/alerts-table";
+import { AlertsTopic } from "./constructs/alerts-topic";
+import { CasesApi } from "./constructs/cases-api";
+import { DlqAlarms } from "./constructs/dlq-alarms";
 
 export interface SenseCareDemoStackProps extends cdk.StackProps {
   // Requeridos, sin default: deben venir de una verificacion manual de
@@ -30,6 +34,11 @@ export interface SenseCareDemoStackProps extends cdk.StackProps {
   bedrockModelId: string;
   bedrockInferenceProfileArn: string;
   bedrockFoundationModelArns: string[];
+  // Opcionales, nunca con default ni email real hardcodeado (ver
+  // alerts-topic.ts). Sin ellos, las suscripciones se agregan a mano tras
+  // el deploy (ver runbook de alertas).
+  alertSubscriptionEmails?: string[];
+  operationalSubscriptionEmails?: string[];
 }
 
 /**
@@ -37,14 +46,19 @@ export interface SenseCareDemoStackProps extends cdk.StackProps {
  * Step Functions Standard por caseId, seguido del transporte seguro de
  * evidencia puntual: consentimiento, UPLOAD_EVIDENCE con URL prefirmada,
  * callbacks MQTT y reconciliacion final, y analisis visual estructurado con
- * Amazon Bedrock Converse tras evidenceStatus AVAILABLE) + Hito 5 parcial
+ * Amazon Bedrock Converse tras evidenceStatus AVAILABLE) + Hito 5 completo
  * (Cognito + API Gateway HTTP para ingesta del simulador web, emparejamiento
- * por QR y consulta de solo lectura, ver DemoIngestApi; las rutas de
- * consulta/cancelacion/escalamiento de familiares siguen pendientes). Sin
- * SNS, Connect, frontend, check-in de voz/audio, Bedrock Agents ni
- * herramientas autonomas todavia (ver docs/IMPLEMENTATION_ROADMAP.md). No
- * instancia Thing ni certificado X.509 (aprovisionamiento por dispositivo,
- * fuera de CDK a proposito: ver runbook de pre-despliegue).
+ * por QR y consulta de solo lectura, ver DemoIngestApi) + hito de alertas
+ * (SNS deduplicado por caso via DispatchAlertFn -- inmediato para sensor
+ * critico, sin esperar evidencia ni Bedrock; red de seguridad al final del
+ * tramo de evidencia/analisis para el resto -- y las acciones humanas
+ * autenticadas CANCEL_ALERT/ESCALATE, ver CasesApi; alarma DLQ -> SNS
+ * operativa via DlqAlarms). Sin Amazon Connect, telefonia, frontend,
+ * check-in de voz/audio, Bedrock Agents ni herramientas autonomas todavia
+ * (ver docs/IMPLEMENTATION_ROADMAP.md): ESCALATE solo registra la intencion
+ * humana, no dispara ninguna llamada. No instancia Thing ni certificado
+ * X.509 (aprovisionamiento por dispositivo, fuera de CDK a proposito: ver
+ * runbook de pre-despliegue).
  */
 export class SenseCareDemoStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: SenseCareDemoStackProps) {
@@ -94,7 +108,19 @@ export class SenseCareDemoStack extends cdk.Stack {
 
     const observations = new ObservationsTable(this, "ObservationsTable");
 
-    new CaseOrchestration(this, "CaseOrchestration", {
+    // Hito de alertas: tabla, GSI de correlacion y topics SNS creados ANTES
+    // de CaseOrchestration porque esta ultima los necesita como props (el
+    // GSI de CaregiverAccessTable debe existir antes de que
+    // CaseOrchestration conceda dynamodb:Query sobre el, ver
+    // caregiver-access-table.ts).
+    const caregiverAccess = new CaregiverAccessTable(this, "CaregiverAccessTable");
+    const alerts = new AlertsTable(this, "AlertsTable");
+    const alertsTopic = new AlertsTopic(this, "AlertsTopic", {
+      alertSubscriptionEmails: props.alertSubscriptionEmails,
+      operationalSubscriptionEmails: props.operationalSubscriptionEmails,
+    });
+
+    const caseOrchestration = new CaseOrchestration(this, "CaseOrchestration", {
       eventBus,
       openCaseLocksTable: tables.openCaseLocksTable,
       anomalyCasesTable: anomalyCases.table,
@@ -106,6 +132,21 @@ export class SenseCareDemoStack extends cdk.Stack {
       bedrockModelId: props.bedrockModelId,
       bedrockInferenceProfileArn: props.bedrockInferenceProfileArn,
       bedrockFoundationModelArns: props.bedrockFoundationModelArns,
+      alertsTable: alerts.table,
+      caregiverAccessTable: caregiverAccess.table,
+      alertsTopic: alertsTopic.alertsTopic,
+    });
+
+    new DlqAlarms(this, "DlqAlarms", {
+      operationalAlarmsTopic: alertsTopic.operationalAlarmsTopic,
+      deadLetterQueues: {
+        Telemetry: queues.telemetry.deadLetterQueue,
+        VisualAnomaly: queues.visualAnomaly.deadLetterQueue,
+        SensorAnomaly: queues.sensorAnomaly.deadLetterQueue,
+        CommandAcks: evidenceCallbackQueues.commandAcks.deadLetterQueue,
+        Evidence: evidenceCallbackQueues.evidence.deadLetterQueue,
+        CaseDispatcher: caseOrchestration.dispatcherDlq,
+      },
     });
 
     // Politica IoT declarativa y versionada, sin Thing/certificado/llave
@@ -136,7 +177,6 @@ export class SenseCareDemoStack extends cdk.Stack {
     // TAMBIEN debe incluir el atributo `pairingCode` en ese PutItem (ver
     // docs/DEMO_INGEST_AUTH.md).
     const demoAuth = new DemoAuth(this, "DemoAuth");
-    const caregiverAccess = new CaregiverAccessTable(this, "CaregiverAccessTable");
     const demoIngestApi = new DemoIngestApi(this, "DemoIngestApi", {
       telemetryQueue: queues.telemetry.queue,
       sensorAnomalyQueue: queues.sensorAnomaly.queue,
@@ -148,11 +188,25 @@ export class SenseCareDemoStack extends cdk.Stack {
       demoDeviceAllowlist: ["sim-room-01"],
     });
 
+    // Hito de alertas: GET /cases/{caseId}/events, POST /cases/{caseId}/cancel
+    // (CANCEL_ALERT), POST /cases/{caseId}/escalate (ESCALATE). Mismo HttpApi
+    // y mismo JWT authorizer que DemoIngestApi (misma URL base, un solo
+    // Cognito User Pool para todo el demo).
+    new CasesApi(this, "CasesApi", {
+      httpApi: demoIngestApi.httpApi,
+      authorizer: demoIngestApi.authorizer,
+      anomalyCasesTable: anomalyCases.table,
+      alertsTable: alerts.table,
+      eventLogTable: tables.eventLogTable,
+      caregiverAccessTable: caregiverAccess.table,
+    });
+
     new cdk.CfnOutput(this, "DemoUserPoolId", { value: demoAuth.userPool.userPoolId });
     new cdk.CfnOutput(this, "DemoUserPoolClientId", { value: demoAuth.userPoolClient.userPoolClientId });
-    // Base para las 4 rutas: POST {url}demo/devices/{deviceId}/events,
+    // Base para las 7 rutas: POST {url}demo/devices/{deviceId}/events,
     // POST {url}devices/{deviceId}/pair, GET {url}devices/{deviceId}/latest,
-    // GET {url}devices/{deviceId}/telemetry
+    // GET {url}devices/{deviceId}/telemetry, GET {url}cases/{caseId}/events,
+    // POST {url}cases/{caseId}/cancel, POST {url}cases/{caseId}/escalate
     new cdk.CfnOutput(this, "DemoIngestApiUrl", { value: demoIngestApi.httpApi.apiEndpoint });
 
     // TODO(Hito 4 - Orquestacion, siguiente tramo): renovar el TTL de
@@ -162,18 +216,10 @@ export class SenseCareDemoStack extends cdk.Stack {
     // UPLOAD_EVIDENCE con URL prefirmada, callbacks MQTT y reconciliacion)
     // ya esta implementado en CaseOrchestration.
 
-    // TODO(Hito 5 - Control de demo, resto): GET /devices/{deviceId}/latest,
-    // GET /devices/{deviceId}/telemetry y POST /devices/{deviceId}/pair ya
-    // estan arriba (DemoIngestApi), protegidas por CaregiverAccessTable.
-    // Falta: GET /cases/{caseId}/events y la accion humana autorizada
-    // (POST /cases/{caseId}/cancel, /escalate) -- esas necesitan verificar
-    // que el sujeto del JWT tiene acceso al recipientId del caso (via el
-    // deviceId que ya emparejo), no solo repetir el chequeo de deviceId.
-
-    // TODO(Hito 6 - Notificacion y llamada): SNS y Amazon Connect Customer
+    // TODO(Hito de telefonia, posterior y separado): Amazon Connect Customer
     // (Voice) via EscalationPolicy/EmergencyDialer, destino unicamente en
-    // allowlist de demo, nunca 911. Incluye la alarma DLQ -> SNS pendiente
-    // (las DLQ de ingesta, dispatcher y callbacks de evidencia ya existen,
-    // sin alarma todavia).
+    // allowlist de demo, nunca 911. ESCALATE (arriba) todavia solo registra
+    // la intencion humana; no dispara ninguna llamada. Alertas SNS + alarma
+    // DLQ -> SNS ya implementadas (AlertsTopic, DlqAlarms).
   }
 }

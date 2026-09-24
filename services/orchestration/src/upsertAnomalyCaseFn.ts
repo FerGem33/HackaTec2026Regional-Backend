@@ -12,6 +12,7 @@ interface AnomalyCaseItem {
   recipientId: string;
   anomalyType: string;
   eventType: string;
+  severity?: "warning" | "critical";
   firstEventId: string;
   createdAt: string;
   updatedAt: string;
@@ -40,6 +41,7 @@ export async function handler(input: CaseTaskInput): Promise<CaseTaskInput> {
           recipientId: caseDetail.recipientId,
           anomalyType: caseDetail.anomalyType,
           eventType: caseDetail.eventType,
+          ...(caseDetail.severity ? { severity: caseDetail.severity } : {}),
           firstEventId: caseDetail.eventId,
           createdAt: now,
           updatedAt: now,

@@ -13,6 +13,7 @@ export default defineConfig({
       "services/orchestration/test/setupEnv.ts",
       "services/evidence/test/setupEnv.ts",
       "services/analysis/test/setupEnv.ts",
+      "services/cases/test/setupEnv.ts",
     ],
   },
 });
