@@ -1,5 +1,7 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from "aws-lambda";
 import { getTelemetryRange } from "./deviceQueryCore.js";
+import { hasDeviceAccess } from "./caregiverAccess.js";
+import { getUserId } from "./authContext.js";
 
 const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
@@ -11,13 +13,27 @@ function jsonResponse(statusCode: number, body: unknown): APIGatewayProxyResultV
   };
 }
 
-/** GET /devices/{deviceId}/telemetry?from=&to=&limit= -- historial para graficas. */
+/**
+ * GET /devices/{deviceId}/telemetry?from=&to=&limit= -- historial para
+ * graficas. Misma verificacion de emparejamiento que getDeviceLatestHandler.
+ */
 export async function handler(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyResultV2> {
   const deviceId = event.pathParameters?.deviceId;
   if (!deviceId) {
     return jsonResponse(400, { error: "Falta deviceId en la ruta" });
+  }
+
+  const userId = getUserId(event);
+  if (!userId) {
+    return jsonResponse(401, { error: "Token sin sub valido" });
+  }
+
+  if (!(await hasDeviceAccess(userId, deviceId))) {
+    return jsonResponse(403, {
+      error: "No tienes acceso a este dispositivo. Empareja primero con POST /devices/{deviceId}/pair",
+    });
   }
 
   const qs = event.queryStringParameters ?? {};

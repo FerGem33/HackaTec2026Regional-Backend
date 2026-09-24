@@ -10,3 +10,4 @@ process.env.DEMO_TELEMETRY_QUEUE_URL ??= "https://sqs.us-east-1.amazonaws.com/12
 process.env.DEMO_SENSOR_ANOMALY_QUEUE_URL ??=
   "https://sqs.us-east-1.amazonaws.com/123456789012/SenseCare-sensor-anomaly-test";
 process.env.DEMO_DEVICE_ALLOWLIST ??= "sim-room-01";
+process.env.CAREGIVER_ACCESS_TABLE_NAME ??= "SenseCare-CaregiverAccess-test";

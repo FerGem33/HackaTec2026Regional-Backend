@@ -9,14 +9,20 @@ documento explica QUÉ se puede mandar (schemas), este explica CÓMO
 autenticarse y a qué URL exacta llamar contra el `DemoIngestApi` ya
 desplegado (Hito 5).
 
-Las 3 rutas expuestas comparten el mismo API y el mismo tipo de token JWT,
+Las 4 rutas expuestas comparten el mismo API y el mismo tipo de token JWT,
 pero tienen alcance distinto:
 
 | Ruta | Quién la usa | Qué `deviceId` acepta |
 | --- | --- | --- |
 | `POST /demo/devices/{deviceId}/events` | Solo el simulador web (escritura) | Solo los de la allowlist de demo (`sim-room-01`) |
-| `GET /devices/{deviceId}/latest` | Simulador web y app móvil (lectura) | Cualquiera, incluido `pi-demo-01` (Pi física real) |
-| `GET /devices/{deviceId}/telemetry` | Simulador web y app móvil (lectura) | Cualquiera, incluido `pi-demo-01` (Pi física real) |
+| `POST /devices/{deviceId}/pair` | Simulador web y app móvil (emparejar por QR) | Cualquiera, si se sabe su `pairingCode` |
+| `GET /devices/{deviceId}/latest` | Simulador web y app móvil (lectura) | Solo dispositivos que ESE usuario ya emparejó |
+| `GET /devices/{deviceId}/telemetry` | Simulador web y app móvil (lectura) | Solo dispositivos que ESE usuario ya emparejó |
+
+**Privacidad: el emparejamiento es obligatorio antes de leer.** Un JWT válido
+por sí solo ya NO basta para leer cualquier `deviceId` — hay que emparejar
+primero (sección 5.0). Esto evita que cualquier usuario autenticado pueda
+espiar los datos de otra persona con solo adivinar/probar un `deviceId`.
 
 El simulador web **nunca** usa certificados X.509 (eso es solo para
 dispositivos físicos con TLS mutuo). Usa un token JWT de Cognito por HTTPS
@@ -103,10 +109,45 @@ Mismo endpoint, mismo `deviceId`, agregando `eventType`, `anomalyType`,
 4.2 para el schema completo). El backend deduplica por `eventId` y abre/
 reutiliza un `AnomalyCase` igual que si viniera de una Pi real por MQTT.
 
+## 5.0 Emparejar un dispositivo por QR (obligatorio antes de leer)
+
+Cada dispositivo (físico o simulado) tiene un `pairingCode` propio, guardado
+en `SenseCare-Devices` y **nunca** devuelto por ninguna ruta de lectura. El
+QR que se muestra junto al dispositivo (pantalla del simulador, o una
+etiqueta impresa cerca de la Pi) codifica un JSON plano con ambos datos:
+
+```json
+{ "deviceId": "sim-room-01", "pairingCode": "AB12CD" }
+```
+
+La app que escanea el QR extrae esos dos campos y llama:
+
+```bash
+curl -X POST "https://<DemoIngestApiUrl>/devices/sim-room-01/pair" \
+  -H "Authorization: Bearer <IdToken>" \
+  -H "Content-Type: application/json" \
+  -d '{ "pairingCode": "AB12CD" }'
+```
+
+Respuesta si el código coincide: `200 { "paired": true, "deviceId": "sim-room-01" }`.
+A partir de ahí, **ese usuario** (identificado por el `sub` de su JWT, no por
+el dispositivo desde el que llama) puede usar `GET .../latest` y
+`GET .../telemetry` para ese `deviceId` — desde cualquier app, cualquier
+sesión, mientras vuelva a loguearse con la misma cuenta de Cognito.
+
+El emparejamiento es por-usuario, no por-instalación: si dos personas
+distintas escanean el mismo QR con sus propias cuentas, ambas quedan
+emparejadas de forma independiente (dos filas en `CaregiverAccess`, cada
+una con su propio `sub`). Nadie más puede leer ese dispositivo sin también
+escanear el QR (o conocer el código) y emparejarse.
+
+El código sirve también como respaldo manual si la cámara falla: puede
+escribirse a mano, la comparación no distingue mayúsculas/minúsculas ni
+espacios.
+
 ## 5.1 Consultar la última lectura de un dispositivo (simulador o app móvil)
 
-Esta ruta **sí funciona con `pi-demo-01`** (o cualquier `deviceId` real), no
-solo con dispositivos de demo:
+Requiere haber emparejado primero (sección 5.0); si no, responde `403`.
 
 ```bash
 curl "https://<DemoIngestApiUrl>/devices/pi-demo-01/latest" \
@@ -165,18 +206,19 @@ poder suplantar a un dispositivo con certificado X.509 real. Para agregar más
 "salas" simuladas, añadir el `deviceId` a la lista en el stack y volver a
 desplegar.
 
-Esta allowlist **no aplica** a las rutas de lectura (`GET .../latest`,
-`GET .../telemetry`): cualquier `deviceId` que exista en las tablas se puede
-consultar con un JWT válido, sin importar si llegó por MQTT o por este API.
+Esta allowlist **no aplica** a las rutas de lectura: lo que las protege es
+el emparejamiento (sección 5.0), no esta lista.
 
-## 7. Requisito antes de que la telemetría se procese: sembrar el dispositivo
+## 7. Requisito antes de usar el dispositivo: sembrarlo con su `pairingCode`
 
 Igual que con la Pi física (ver
 [DEVICE_PROVISIONING_AND_SMOKE_TEST.md](DEVICE_PROVISIONING_AND_SMOKE_TEST.md)
 sección 1), la tabla `SenseCare-Devices` necesita una fila para
 `sim-room-01` antes de que la telemetría se acepte río abajo (si no, el
 mensaje llega a SQS pero la Lambda de ingesta lo rechaza por
-`DeviceNotFoundError` y termina en la DLQ tras varios reintentos):
+`DeviceNotFoundError` y termina en la DLQ tras varios reintentos). Ahora
+también hay que incluir `pairingCode` — sin él, nadie puede emparearse ni
+leer ese dispositivo:
 
 ```bash
 aws dynamodb put-item \
@@ -185,9 +227,28 @@ aws dynamodb put-item \
   --item '{
     "deviceId": {"S": "sim-room-01"},
     "recipientId": {"S": "recipient-demo-01"},
+    "pairingCode": {"S": "AB12CD"},
     "createdAt": {"S": "2026-09-24T00:00:00Z"}
   }' \
   --condition-expression "attribute_not_exists(deviceId)"
+```
+
+Genera el código con algo no adivinable, por ejemplo:
+
+```bash
+openssl rand -hex 3 | tr 'a-z' 'A-Z'   # ej: 7F3A0B
+```
+
+Si `pi-demo-01` ya existía sin `pairingCode` (sembrado antes de este
+cambio), agrégaselo con `update-item`:
+
+```bash
+aws dynamodb update-item \
+  --table-name SenseCare-Devices \
+  --region us-east-1 \
+  --key '{"deviceId": {"S": "pi-demo-01"}}' \
+  --update-expression "SET pairingCode = :code" \
+  --expression-attribute-values '{":code": {"S": "9K2M7X"}}'
 ```
 
 ## Errores comunes
@@ -201,3 +262,6 @@ aws dynamodb put-item \
 | `400` (en `GET .../telemetry`) | `from`/`to` no es ISO-8601 UTC terminado en `Z`, o `limit` no es un entero positivo |
 | El mensaje nunca llega a DynamoDB | Falta sembrar `sim-room-01` en `SenseCare-Devices` (paso 7) |
 | `GET .../latest` responde `lastSeenAt: null` | El dispositivo nunca ha publicado telemetría, o su `deviceId` está mal escrito |
+| `403` en `POST .../pair` | El `pairingCode` no coincide con el guardado en `SenseCare-Devices` |
+| `404` en `POST .../pair` | El `deviceId` no existe en `SenseCare-Devices` (falta sembrarlo, paso 7) |
+| `403` en `GET .../latest` o `.../telemetry` con `"No tienes acceso a este dispositivo"` | El usuario nunca emparejó ese `deviceId` — llamar primero a `POST .../pair` (sección 5.0) |

@@ -15,6 +15,7 @@ export interface DemoApiProps {
   sensorAnomalyQueue: sqs.IQueue;
   devicesTable: dynamodb.ITable;
   telemetryTable: dynamodb.ITable;
+  caregiverAccessTable: dynamodb.ITable;
   userPool: cognito.UserPool;
   userPoolClient: cognito.UserPoolClient;
   /** deviceId reservados para el simulador web; nunca deviceId de una Pi real con certificado X.509. */
@@ -43,13 +44,17 @@ const commonFnProps = {
  *
  * Importante: la allowlist de deviceId SOLO aplica a la ruta de ingesta
  * (evita que HTTPS suplante a un dispositivo con certificado X.509 real).
- * Las rutas de lectura no la usan -- ver comentario en deviceQueryCore.ts.
+ * Las rutas de lectura usan CaregiverAccess en su lugar (emparejamiento
+ * por QR + pairingCode via POST /devices/{deviceId}/pair): un JWT valido
+ * no basta para leer un deviceId que ese usuario nunca emparejo -- ver
+ * caregiverAccess.ts.
  */
 export class DemoIngestApi extends Construct {
   public readonly httpApi: apigwv2.HttpApi;
   public readonly ingestFn: lambdaNodejs.NodejsFunction;
   public readonly getLatestFn: lambdaNodejs.NodejsFunction;
   public readonly getTelemetryFn: lambdaNodejs.NodejsFunction;
+  public readonly pairDeviceFn: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: DemoApiProps) {
     super(scope, id);
@@ -72,6 +77,7 @@ export class DemoIngestApi extends Construct {
     const readEnvironment = {
       DEVICES_TABLE_NAME: props.devicesTable.tableName,
       TELEMETRY_TABLE_NAME: props.telemetryTable.tableName,
+      CAREGIVER_ACCESS_TABLE_NAME: props.caregiverAccessTable.tableName,
     };
 
     this.getLatestFn = new lambdaNodejs.NodejsFunction(this, "GetDeviceLatestFn", {
@@ -82,6 +88,7 @@ export class DemoIngestApi extends Construct {
     });
     props.devicesTable.grant(this.getLatestFn, "dynamodb:GetItem");
     props.telemetryTable.grant(this.getLatestFn, "dynamodb:Query");
+    props.caregiverAccessTable.grant(this.getLatestFn, "dynamodb:GetItem");
 
     this.getTelemetryFn = new lambdaNodejs.NodejsFunction(this, "GetDeviceTelemetryFn", {
       ...commonFnProps,
@@ -90,6 +97,16 @@ export class DemoIngestApi extends Construct {
       environment: readEnvironment,
     });
     props.telemetryTable.grant(this.getTelemetryFn, "dynamodb:Query");
+    props.caregiverAccessTable.grant(this.getTelemetryFn, "dynamodb:GetItem");
+
+    this.pairDeviceFn = new lambdaNodejs.NodejsFunction(this, "PairDeviceFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-pairDevice",
+      entry: path.join(SERVICE_ENTRY_ROOT, "pairDeviceHandler.ts"),
+      environment: readEnvironment,
+    });
+    props.devicesTable.grant(this.pairDeviceFn, "dynamodb:GetItem");
+    props.caregiverAccessTable.grant(this.pairDeviceFn, "dynamodb:PutItem");
 
     const authorizer = new HttpJwtAuthorizer("DemoJwtAuthorizer", props.userPool.userPoolProviderUrl, {
       jwtAudience: [props.userPoolClient.userPoolClientId],
@@ -98,7 +115,7 @@ export class DemoIngestApi extends Construct {
     this.httpApi = new apigwv2.HttpApi(this, "DemoIngestHttpApi", {
       apiName: "SenseCare-demo-api",
       description:
-        "Hito 5: ingesta HTTPS del simulador web (sin VISUAL_ANOMALY) + consulta de solo lectura de telemetria por deviceId.",
+        "Hito 5: ingesta HTTPS del simulador web (sin VISUAL_ANOMALY) + emparejamiento por QR + consulta de solo lectura de telemetria por deviceId ya emparejado.",
       corsPreflight: {
         allowOrigins: ["*"],
         allowMethods: [apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.GET],
@@ -110,6 +127,13 @@ export class DemoIngestApi extends Construct {
       path: "/demo/devices/{deviceId}/events",
       methods: [apigwv2.HttpMethod.POST],
       integration: new HttpLambdaIntegration("DemoIngestIntegration", this.ingestFn),
+      authorizer,
+    });
+
+    this.httpApi.addRoutes({
+      path: "/devices/{deviceId}/pair",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new HttpLambdaIntegration("PairDeviceIntegration", this.pairDeviceFn),
       authorizer,
     });
 

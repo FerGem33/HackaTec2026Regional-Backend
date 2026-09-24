@@ -10,4 +10,5 @@ import { requireEnv } from "./config.js";
 export const queryConfig = {
   devicesTableName: requireEnv("DEVICES_TABLE_NAME"),
   telemetryTableName: requireEnv("TELEMETRY_TABLE_NAME"),
+  caregiverAccessTableName: requireEnv("CAREGIVER_ACCESS_TABLE_NAME"),
 };
