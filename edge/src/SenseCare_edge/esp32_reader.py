@@ -67,6 +67,17 @@ def _to_float(value) -> Optional[float]:
         return None
 
 
+def _to_non_negative_float(value) -> Optional[float]:
+    """Como _to_float, pero recorta negativos a 0. El calculo de dB del
+    sketch usa un piso de rms=1 cuando hay silencio real, lo que da un
+    -18.5 matematico (no un error de sensor); dB SPL nunca es negativo en
+    la realidad, asi que 0 es la representacion correcta de "silencio"."""
+    value = _to_float(value)
+    if value is None:
+        return None
+    return max(0.0, value)
+
+
 def _parse_line(line: str) -> Optional[SensorReading]:
     try:
         data = json.loads(line)
@@ -88,8 +99,8 @@ def _parse_line(line: str) -> Optional[SensorReading]:
         proximityCm=proximity_cm,
         motion=bool(data.get("presencia")) if "presencia" in data else None,
         luxLevel=_to_float(data.get("lux")),
-        dbAvg=_to_float(data.get("db_prom")),
-        dbPeak=_to_float(data.get("db_pico")),
+        dbAvg=_to_non_negative_float(data.get("db_prom")),
+        dbPeak=_to_non_negative_float(data.get("db_pico")),
         raw=data,
     )
 
