@@ -309,7 +309,7 @@ Tablas:
 | `Devices` | `deviceId` | Último contacto, estado, versión, configuración y `recipientId`. |
 | `Telemetry` | `deviceId` / `timestamp#eventId` | Historial de sensores. |
 | `Alerts` | `recipientId` / `createdAt#alertId` | Severidad, estado, evidencia y confirmación. |
-| `Observations` | `recipientId` / `capturedAt#imageId` | Resultado visual, `caseId` y llave S3. |
+| `Observations` | `caseId` / `imageId` | Resultado visual estructurado de Bedrock Converse (implementado en Hito 4, tramo de analisis): `recipientId`, llave S3, campos cerrados (`riskIndicators`, `needsHumanReview`, `confidence`), `summary` narrativo, modelo/configuracion y timestamps. TTL sobre `ttlEpochSeconds` (~7 dias, igual al lifecycle de S3 de `raw-images/`), `RemovalPolicy.RETAIN`. Los mismos campos cerrados (sin `summary`) se copian ademas a `AnomalyCases.analysisStatus`/`analysisRiskIndicators`, que si es permanente. |
 | `AnomalyCases` | `caseId` | Estado, `executionArn`, evidencia, plazos, respuestas y resultado de escalamiento. |
 | `OpenCaseLocks` | `recipientId#anomalyType` | Candado de caso abierto, actualizado/liberado al resolver y protegido con TTL. |
 | `EventLog` | `caseId` / `timestamp#eventId` | Trazabilidad de decisiones, llamadas a herramientas y cambios de estado; sin foto, audio ni biometría cruda. |
@@ -320,7 +320,7 @@ Configuración:
 - Billing: `PAY_PER_REQUEST`.
 - TTL:
   - Telemetría: 30–90 días.
-  - Observaciones: según consentimiento y política de retención.
+  - Observaciones: 7 días (mismo horizonte que el lifecycle de S3 de `raw-images/`), sobre `ttlEpochSeconds` numérico.
 - GSI opcionales:
   - `AlertsByAlertId` y `ObservationsByObservationId`, o incluir `recipientId` en las rutas de API.
   - `DevicesByRecipient`.
@@ -403,26 +403,57 @@ Bedrock permite usar modelos generativos sin operar infraestructura de modelos.
 | Salida | JSON de observación; un timeout/error se normaliza como `uncertain`. |
 | Necesidad | Opcional para sensores; indispensable para análisis visual. |
 
-Configuración recomendada:
+Configuración implementada (Hito 4, tramo de análisis: `AnalyzeEvidence` en
+`infra/lib/constructs/case-orchestration.ts`, Lambda en
+`services/analysis/`):
 
-- Modelo inicial: Amazon Nova Lite.
-- API: Converse.
-- `maxTokens`: 250–350, establecido explícitamente.
-- `temperature`: 0–0.2.
-- Validar salida contra un esquema JSON.
-- No incluir nombres, direcciones o datos médicos en prompts.
-- Desactivar logs de invocación completos o cifrarlos y restringirlos.
-- Reintentos exponenciales para throttling.
+- Modelo: Amazon Nova Lite (`amazon.nova-lite-v1:0`), invocado vía el
+  inference profile geográfico `us.amazon.nova-lite-v1:0` (residencia/
+  privacidad; se prefiere `us.*` sobre `global.*`). `modelId` es
+  configuración (variable de entorno `BEDROCK_MODEL_ID`), nunca un literal
+  fijo en código; el operador verifica disponibilidad/acceso real con
+  `aws bedrock list-foundation-models`/`list-inference-profiles` (solo
+  lectura) antes de cada despliegue.
+- API: Converse (`bedrock:InvokeModel` es la acción IAM que la autoriza; no
+  hay una acción IAM separada para Converse).
+- `maxTokens`: 300–500, por defecto 400, explícito.
+- `temperature`: 0–0.1, por defecto 0.
+- Salida validada contra un esquema JSON runtime (`services/analysis/src/observationSchema.ts`),
+  cerrado a los mismos `riskIndicators` que `visualAnomaly.schema.json` ya
+  define; una salida inválida se normaliza como `analysisStatus: UNCERTAIN`,
+  `failureReason: INVALID_OUTPUT`.
+- Sin nombres, direcciones, datos médicos ni identificadores internos
+  (`caseId`/`deviceId`/`recipientId`) en el prompt: el único contexto que
+  acompaña a la imagen es el `anomalyType`/`captureMode` que ya disparó la
+  captura.
+- Logging de invocación de Bedrock deshabilitado (nunca se llama
+  `PutModelInvocationLoggingConfiguration`).
+- IAM: permiso sobre el ARN del inference profile y, con la condición
+  `bedrock:InferenceProfileArn`, sobre los ARN de foundation model de cada
+  región a la que ese profile puede enrutar (ver
+  [prerrequisitos de inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html)).
+  Nunca `bedrock:*` ni `AmazonBedrockFullAccess`.
+- Reintentos de Step Functions solo para `ThrottlingException`,
+  `ModelTimeoutException`, `ServiceUnavailableException`,
+  `InternalServerException` y `ModelErrorException`; `ValidationException`/
+  `AccessDeniedException`/`ResourceNotFoundException` se atrapan dentro del
+  Lambda y nunca se reintentan (son errores de configuración, no
+  transitorios).
+- `evidenceStatus` nunca cambia por el resultado del análisis: permanece
+  `AVAILABLE`. El caso permanece abierto (`AnomalyCases.status` sin tocar);
+  cerrar o escalar es responsabilidad de un hito posterior.
 
-Prompt conceptual:
+Prompt de sistema (implementado en `services/analysis/src/bedrockPrompt.ts`):
 
 ```text
-Analiza esta imagen de forma no médica.
-Devuelve únicamente JSON válido.
-No diagnostiques enfermedades.
-Marca needsHumanReview=true si existe incertidumbre o posible peligro.
-Puedes solicitar sólo herramientas enumeradas por el sistema.
-No llames ni solicites marcar un número directamente: una política externa decide el escalamiento.
+Eres un sistema de apoyo, no un profesional médico ni de seguridad.
+Responde ÚNICAMENTE con un objeto JSON válido, sin texto adicional, sin
+bloques de código markdown, con exactamente esta forma:
+{personDetected, posture, riskIndicators[], needsHumanReview, confidence, summary}
+Nunca emitas un diagnóstico médico ni acuses a una persona identificable de
+un delito. Si hay cualquier incertidumbre o señal de peligro,
+needsHumanReview=true. No inventes certeza: si la escena no es clara, dilo
+en summary y baja confidence.
 ```
 
 ---
