@@ -2,11 +2,13 @@ import * as cdk from "aws-cdk-lib";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaNodejs from "aws-cdk-lib/aws-lambda-nodejs";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import * as sfn from "aws-cdk-lib/aws-stepfunctions";
 import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as sqs from "aws-cdk-lib/aws-sqs";
+import * as iam from "aws-cdk-lib/aws-iam";
 import { Construct } from "constructs";
 import * as path from "node:path";
 
@@ -14,13 +16,20 @@ export interface CaseOrchestrationProps {
   eventBus: events.IEventBus;
   openCaseLocksTable: dynamodb.ITable;
   anomalyCasesTable: dynamodb.ITable;
+  devicesTable: dynamodb.ITable;
+  evidenceCallbacksTable: dynamodb.ITable;
+  eventLogTable: dynamodb.ITable;
+  evidenceBucket: s3.IBucket;
   openCaseLockTtlSeconds?: number;
+  evidenceUploadTimeoutSeconds?: number;
+  evidenceCallbackTtlBufferSeconds?: number;
+  evidenceWaitTimeoutSeconds?: number;
 }
 
 // Resuelto desde __dirname (no process.cwd()): estable sin importar desde
 // que directorio se invoque `cdk`/`npm test` (misma correccion aplicada a
 // ingestion-functions.ts en Hito 2).
-const SERVICE_ENTRY_ROOT = path.resolve(
+const ORCHESTRATION_ENTRY_ROOT = path.resolve(
   __dirname,
   "..",
   "..",
@@ -29,16 +38,22 @@ const SERVICE_ENTRY_ROOT = path.resolve(
   "orchestration",
   "src",
 );
+const EVIDENCE_ENTRY_ROOT = path.resolve(__dirname, "..", "..", "..", "services", "evidence", "src");
 
 /**
- * Hito 4, primer tramo: EventBridge -> Step Functions Standard por
- * caseId. No incluye Bedrock, S3/evidencia, SNS, Connect, Cognito, API
- * Gateway ni frontend. El flujo solo registra el inicio del caso, crea o
- * actualiza AnomalyCases, renueva OpenCaseLocks una vez y termina.
+ * Hito 4 completo: EventBridge -> Step Functions Standard por caseId,
+ * seguido del tramo de transporte seguro de evidencia puntual
+ * (CheckCameraConsent -> RequestEvidenceUpload con waitForTaskToken ->
+ * RecordEvidenceOutcome). No incluye Bedrock, SNS, Connect, Cognito, API
+ * Gateway, frontend ni check-in de voz/audio (ver
+ * docs/IMPLEMENTATION_ROADMAP.md).
  *
  * Sin CloudWatch Logs en la State Machine (decision explicita de esta
- * ola). Sin waitForTaskToken: cero tokens de Step Functions expuestos
- * fuera de AWS en este hito.
+ * ola). El unico waitForTaskToken de todo el sistema es
+ * RequestEvidenceUpload; el token nunca se escribe en AnomalyCases,
+ * EventLog ni en ningun estado posterior de la propia ejecucion (solo
+ * transita, de forma inherente al patron nativo de AWS, como parte de los
+ * parametros de invocacion de esa unica Task mientras espera).
  */
 export class CaseOrchestration extends Construct {
   public readonly stateMachine: sfn.StateMachine;
@@ -49,7 +64,7 @@ export class CaseOrchestration extends Construct {
 
     // Sin reservedConcurrentExecutions: ver ingestion-functions.ts para el
     // porque (la cuenta debe conservar al menos 10 ejecuciones Lambda no
-    // reservadas; reservar en las 6 Lambdas de SenseCare lo violaba).
+    // reservadas; reservar en las Lambdas de SenseCare lo violaba).
     const commonFnProps = {
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
@@ -59,7 +74,7 @@ export class CaseOrchestration extends Construct {
       handler: "handler",
     } satisfies Partial<lambdaNodejs.NodejsFunctionProps>;
 
-    // --- Task Lambdas (invocadas por Step Functions, no por SQS/IoT) ---
+    // --- Task Lambdas: registro de caso (tramo original) ---
 
     const taskEnvironment = {
       OPEN_CASE_LOCKS_TABLE_NAME: props.openCaseLocksTable.tableName,
@@ -70,7 +85,7 @@ export class CaseOrchestration extends Construct {
     const renewOpenCaseLockFn = new lambdaNodejs.NodejsFunction(this, "RenewOpenCaseLockFn", {
       ...commonFnProps,
       functionName: "SenseCare-renewOpenCaseLock",
-      entry: path.join(SERVICE_ENTRY_ROOT, "renewOpenCaseLockFn.ts"),
+      entry: path.join(ORCHESTRATION_ENTRY_ROOT, "renewOpenCaseLockFn.ts"),
       environment: taskEnvironment,
     });
     props.openCaseLocksTable.grant(renewOpenCaseLockFn, "dynamodb:UpdateItem");
@@ -78,16 +93,91 @@ export class CaseOrchestration extends Construct {
     const upsertAnomalyCaseFn = new lambdaNodejs.NodejsFunction(this, "UpsertAnomalyCaseFn", {
       ...commonFnProps,
       functionName: "SenseCare-upsertAnomalyCase",
-      entry: path.join(SERVICE_ENTRY_ROOT, "upsertAnomalyCaseFn.ts"),
+      entry: path.join(ORCHESTRATION_ENTRY_ROOT, "upsertAnomalyCaseFn.ts"),
       environment: taskEnvironment,
     });
     props.anomalyCasesTable.grant(upsertAnomalyCaseFn, "dynamodb:PutItem", "dynamodb:UpdateItem");
 
+    // --- Task Lambdas: tramo de evidencia ---
+
+    const cameraConsentFn = new lambdaNodejs.NodejsFunction(this, "CameraConsentFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-cameraConsent",
+      entry: path.join(EVIDENCE_ENTRY_ROOT, "cameraConsentFn.ts"),
+      environment: {
+        DEVICES_TABLE_NAME: props.devicesTable.tableName,
+      },
+    });
+    props.devicesTable.grant(cameraConsentFn, "dynamodb:GetItem");
+
+    const requestEvidenceUploadFn = new lambdaNodejs.NodejsFunction(this, "RequestEvidenceUploadFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-requestEvidenceUpload",
+      entry: path.join(EVIDENCE_ENTRY_ROOT, "requestEvidenceUploadFn.ts"),
+      environment: {
+        EVIDENCE_CALLBACKS_TABLE_NAME: props.evidenceCallbacksTable.tableName,
+        EVENT_LOG_TABLE_NAME: props.eventLogTable.tableName,
+        EVIDENCE_BUCKET_NAME: props.evidenceBucket.bucketName,
+        EVIDENCE_UPLOAD_TIMEOUT_SECONDS: String(props.evidenceUploadTimeoutSeconds ?? 60),
+        EVIDENCE_CALLBACK_TTL_BUFFER_SECONDS: String(props.evidenceCallbackTtlBufferSeconds ?? 3600),
+      },
+    });
+    props.evidenceCallbacksTable.grant(
+      requestEvidenceUploadFn,
+      "dynamodb:PutItem",
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem",
+    );
+    props.eventLogTable.grant(requestEvidenceUploadFn, "dynamodb:PutItem");
+    // Firmar una URL PUT no hace ninguna llamada a AWS por si mismo, pero
+    // la firma resultante se valida contra los permisos IAM de ESTE rol en
+    // el momento en que la Pi realiza el PUT real; sin s3:PutObject aqui,
+    // la subida de la Pi recibiria 403 pese a tener una URL "valida".
+    // Acotado al prefijo raw-images/ del bucket, nunca al bucket completo
+    // ni a s3:*.
+    requestEvidenceUploadFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:PutObject"],
+        resources: [props.evidenceBucket.arnForObjects("raw-images/*")],
+      }),
+    );
+    // iot:Publish, no s3:*/dynamodb:*/Action:"*": una sola accion, acotada
+    // por sufijo de topic a "/commands" para cualquier deviceId (esta
+    // Lambda sirve casos de cualquier dispositivo, a diferencia de la
+    // politica del propio dispositivo en device-access-policy.ts, que
+    // resuelve un solo ThingName por conexion). Aprobado explicitamente
+    // durante el diseno de este tramo.
+    requestEvidenceUploadFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["iot:Publish"],
+        resources: [
+          `arn:aws:iot:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:topic/SenseCare/v1/devices/*/commands`,
+        ],
+      }),
+    );
+
+    const recordEvidenceOutcomeFn = new lambdaNodejs.NodejsFunction(this, "RecordEvidenceOutcomeFn", {
+      ...commonFnProps,
+      functionName: "SenseCare-recordEvidenceOutcome",
+      entry: path.join(EVIDENCE_ENTRY_ROOT, "recordEvidenceOutcomeFn.ts"),
+      environment: {
+        ANOMALY_CASES_TABLE_NAME: props.anomalyCasesTable.tableName,
+        EVIDENCE_CALLBACKS_TABLE_NAME: props.evidenceCallbacksTable.tableName,
+        EVENT_LOG_TABLE_NAME: props.eventLogTable.tableName,
+      },
+    });
+    props.anomalyCasesTable.grant(recordEvidenceOutcomeFn, "dynamodb:UpdateItem");
+    // Solo UpdateItem: reconcileAfterWorkflowOutcome nunca lee ni crea
+    // registros en EvidenceCallbacks, unicamente los cierra a RESOLVED (o
+    // no-opea si SKIPPED_NO_CONSENT nunca creo uno).
+    props.evidenceCallbacksTable.grant(recordEvidenceOutcomeFn, "dynamodb:UpdateItem");
+    props.eventLogTable.grant(recordEvidenceOutcomeFn, "dynamodb:PutItem");
+
     // --- State Machine ---
-    // Cada Task recibe { caseDetail: $, executionArn: $$.Execution.Id } y
-    // descarta su propio resultado (JsonPath.DISCARD), asi que "$" nunca
-    // cambia entre estados: ambas tasks ven exactamente el mismo detalle
-    // de anomalia con el que arranco la ejecucion.
+    // Cada Task del tramo de registro recibe { caseDetail: $, executionArn:
+    // $$.Execution.Id } y descarta su propio resultado (JsonPath.DISCARD),
+    // asi que "$" nunca cambia entre estados: ambas tasks ven exactamente
+    // el mismo detalle de anomalia con el que arranco la ejecucion.
     const taskPayload = sfn.TaskInput.fromObject({
       "caseDetail.$": "$",
       "executionArn.$": "$$.Execution.Id",
@@ -128,9 +218,157 @@ export class CaseOrchestration extends Construct {
       resultPath: "$.error",
     });
 
-    const caseRegistered = new sfn.Succeed(this, "CaseRegistered");
+    // --- Tramo de evidencia ---
+    // A partir de aqui "$" deja de ser el detalle plano de la anomalia: se
+    // envuelve una sola vez en { caseDetail, executionArn } para poder
+    // acumular campos hermanos (cameraConsent, evidenceStatus, ...) sin
+    // ensuciar caseDetail con datos de fases posteriores.
+    const prepareEvidencePhase = new sfn.Pass(this, "PrepareEvidencePhase", {
+      parameters: {
+        "caseDetail.$": "$",
+        "executionArn.$": "$$.Execution.Id",
+      },
+    });
 
-    const definition = renewLockTask.next(upsertCaseTask).next(caseRegistered);
+    const evidenceRecordingFailed = new sfn.Fail(this, "EvidenceOutcomeRecordingFailed", {
+      error: "EvidenceOutcomeRecordingFailed",
+      cause: "No se pudo registrar el resultado final de evidencia; revisar CloudWatch Logs y EventLog.",
+    });
+
+    const recordOutcomeTask = new tasks.LambdaInvoke(this, "RecordEvidenceOutcome", {
+      lambdaFunction: recordEvidenceOutcomeFn,
+      // "$" ya tiene, en cada rama, exactamente la forma de
+      // RecordEvidenceOutcomeInput (ver los Pass de cada rama abajo): sin
+      // reconstruir el payload campo por campo, lo que evitaria referenciar
+      // por error una ruta ausente en alguna rama (p. ej. evidenceReason no
+      // existe en la rama AVAILABLE).
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+      retryOnServiceExceptions: true,
+    });
+    recordOutcomeTask.addCatch(evidenceRecordingFailed, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.error",
+    });
+
+    const caseEvidencePhaseComplete = new sfn.Succeed(this, "CaseEvidencePhaseComplete");
+    recordOutcomeTask.next(caseEvidencePhaseComplete);
+
+    const mapToSkippedNoConsent = new sfn.Pass(this, "MapToSkippedNoConsent", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        evidenceStatus: "SKIPPED_NO_CONSENT",
+      },
+    });
+    mapToSkippedNoConsent.next(recordOutcomeTask);
+
+    const mapToAvailable = new sfn.Pass(this, "MapToAvailable", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        evidenceStatus: "AVAILABLE",
+        "evidenceS3Key.$": "$.evidenceUploadResult.s3Key",
+        "evidenceImageId.$": "$.evidenceUploadResult.imageId",
+      },
+    });
+    mapToAvailable.next(recordOutcomeTask);
+
+    const mapToIncomplete = new sfn.Pass(this, "MapToIncomplete", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        evidenceStatus: "INCOMPLETE",
+        "evidenceReason.$": "$.evidenceError.Error",
+      },
+    });
+    mapToIncomplete.next(recordOutcomeTask);
+
+    // A diferencia de MapToIncomplete (que solo recibe codigos cerrados
+    // conocidos: REJECTED, UPLOAD_FAILED, OBJECT_INVALID, OBJECT_MISSING,
+    // States.Timeout), este es el destino del catch-all States.ALL: puede
+    // recibir CUALQUIER error tecnico no controlado (excepcion de runtime,
+    // fallo de SDK, etc.). evidenceReason debe ser un codigo fijo y seguro,
+    // nunca $.evidenceError.Error, para no propagar texto de error tecnico
+    // no controlado hacia AnomalyCases ni EventLog.
+    const mapToError = new sfn.Pass(this, "MapToError", {
+      parameters: {
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        evidenceStatus: "ERROR",
+        evidenceReason: "INTERNAL_ERROR",
+      },
+    });
+    mapToError.next(recordOutcomeTask);
+
+    const checkCameraConsentTask = new tasks.LambdaInvoke(this, "CheckCameraConsent", {
+      lambdaFunction: cameraConsentFn,
+      payload: sfn.TaskInput.fromObject({
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.cameraConsent",
+      retryOnServiceExceptions: true,
+    });
+    checkCameraConsentTask.addCatch(mapToError, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.evidenceError",
+    });
+
+    // Motivos de rechazo/incertidumbre conocidos (COMMAND_ACK
+    // accepted:false, resultado de evidencia invalido/ausente, o el
+    // timeout nativo del wait) mapean a INCOMPLETE, nunca a un cierre
+    // automatico exitoso ni a ERROR. Cualquier otra falla tecnica cae en el
+    // catch-all -> ERROR.
+    const knownIncompleteErrors = [
+      "REJECTED",
+      "UPLOAD_FAILED",
+      "OBJECT_INVALID",
+      "OBJECT_MISSING",
+      "States.Timeout",
+    ];
+
+    const requestEvidenceUploadTask = new tasks.LambdaInvoke(this, "RequestEvidenceUpload", {
+      lambdaFunction: requestEvidenceUploadFn,
+      integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+      payload: sfn.TaskInput.fromObject({
+        "caseDetail.$": "$.caseDetail",
+        "executionArn.$": "$.executionArn",
+        taskToken: sfn.JsonPath.taskToken,
+      }),
+      // ~90s: por encima de EVIDENCE_UPLOAD_TIMEOUT_SECONDS (60s, el
+      // vencimiento propio del comando UPLOAD_EVIDENCE/de la URL prefirmada
+      // en EvidenceCallbacks) y con margen suficiente para que las colas de
+      // callback (visibilityTimeout ~20s, ver evidence-callback-queues.ts)
+      // completen al menos 3 intentos de entrega/procesamiento de un
+      // COMMAND_ACK o resultado de evidencia -- por ejemplo tras un
+      // throttling transitorio de DynamoDB -- antes de que Step Functions
+      // tome el timeout por su cuenta. Ver
+      // infra/test/evidence-timing.test.ts para la relacion numerica exacta.
+      taskTimeout: sfn.Timeout.duration(cdk.Duration.seconds(props.evidenceWaitTimeoutSeconds ?? 90)),
+      resultPath: "$.evidenceUploadResult",
+    });
+    requestEvidenceUploadTask.addCatch(mapToIncomplete, {
+      errors: knownIncompleteErrors,
+      resultPath: "$.evidenceError",
+    });
+    requestEvidenceUploadTask.addCatch(mapToError, {
+      errors: [sfn.Errors.ALL],
+      resultPath: "$.evidenceError",
+    });
+    requestEvidenceUploadTask.next(mapToAvailable);
+
+    const cameraConsentGranted = sfn.Condition.booleanEquals("$.cameraConsent", true);
+    const cameraConsentChoice = new sfn.Choice(this, "CameraConsentGranted?")
+      .when(cameraConsentGranted, requestEvidenceUploadTask)
+      .otherwise(mapToSkippedNoConsent);
+
+    const definition = renewLockTask
+      .next(upsertCaseTask)
+      .next(prepareEvidencePhase)
+      .next(checkCameraConsentTask)
+      .next(cameraConsentChoice);
 
     this.stateMachine = new sfn.StateMachine(this, "SenseCareCaseStateMachine", {
       stateMachineName: "SenseCare-CaseStateMachine",
@@ -146,7 +384,7 @@ export class CaseOrchestration extends Construct {
     this.caseDispatcherFn = new lambdaNodejs.NodejsFunction(this, "CaseDispatcherFn", {
       ...commonFnProps,
       functionName: "SenseCare-caseDispatcher",
-      entry: path.join(SERVICE_ENTRY_ROOT, "caseDispatcherFn.ts"),
+      entry: path.join(ORCHESTRATION_ENTRY_ROOT, "caseDispatcherFn.ts"),
       environment: {
         STATE_MACHINE_ARN: this.stateMachine.stateMachineArn,
       },

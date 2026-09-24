@@ -3,9 +3,12 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
 
 /**
- * Bucket privado de evidencia. Sin consumidores todavia en este hito
- * (subida/lectura llega en el Hito 4+); se crea ahora porque es
- * infraestructura pasiva, sin secretos ni certificados involucrados.
+ * Bucket privado de evidencia. requestEvidenceUploadFn firma URLs PUT hacia
+ * el prefijo raw-images/ (nunca sube bytes desde el backend); la Pi es la
+ * unica que efectivamente escribe objetos, usando esa URL prefirmada.
+ * evidenceCallbackHandlerFn valida (HeadObject) y, si es invalido, borra el
+ * objeto subido (ver infra/lib/constructs/case-orchestration.ts y
+ * evidence-callback-handlers.ts).
  */
 export class EvidenceBucket extends Construct {
   public readonly bucket: s3.Bucket;

@@ -1,0 +1,9 @@
+process.env.DEVICES_TABLE_NAME ??= "SenseCare-Devices-test";
+process.env.ANOMALY_CASES_TABLE_NAME ??= "SenseCare-AnomalyCases-test";
+process.env.EVENT_LOG_TABLE_NAME ??= "SenseCare-EventLog-test";
+process.env.EVIDENCE_CALLBACKS_TABLE_NAME ??= "SenseCare-EvidenceCallbacks-test";
+process.env.EVIDENCE_BUCKET_NAME ??= "sensecare-private-images-test";
+process.env.EVIDENCE_UPLOAD_TIMEOUT_SECONDS ??= "60";
+process.env.EVIDENCE_CALLBACK_TTL_BUFFER_SECONDS ??= "3600";
+process.env.RESOLUTION_LEASE_SECONDS ??= "30";
+process.env.EVIDENCE_MAX_BYTES ??= "1048576";

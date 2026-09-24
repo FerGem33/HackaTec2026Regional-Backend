@@ -24,6 +24,12 @@ describe("CommandAck schema", () => {
     expect(validateCommandAck({ ...acceptedAck, accepted: false, reason: "EXPIRED" })).toBe(true);
   });
 
+  it("accepts COMMAND_CONFLICT as a valid rejection reason", () => {
+    expect(validateCommandAck({ ...acceptedAck, accepted: false, reason: "COMMAND_CONFLICT" })).toBe(
+      true,
+    );
+  });
+
   it("rejects a rejected ack without a reason", () => {
     expect(validateCommandAck({ ...acceptedAck, accepted: false })).toBe(false);
   });

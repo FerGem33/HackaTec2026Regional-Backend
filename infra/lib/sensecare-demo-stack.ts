@@ -11,24 +11,29 @@ import { IngestionQueues } from "./constructs/ingestion-queues";
 import { IotIngestionRules } from "./constructs/iot-ingestion-rules";
 import { IngestionFunctions } from "./constructs/ingestion-functions";
 import { AnomalyCasesTable } from "./constructs/anomaly-cases-table";
+import { EvidenceCallbacksTable } from "./constructs/evidence-callbacks-table";
+import { EvidenceCallbackQueues } from "./constructs/evidence-callback-queues";
+import { EvidenceCallbackRules } from "./constructs/evidence-callback-rules";
+import { EvidenceCallbackHandlers } from "./constructs/evidence-callback-handlers";
 import { CaseOrchestration } from "./constructs/case-orchestration";
 import { DeviceAccessPolicy } from "./constructs/device-access-policy";
 
 /**
- * Hito 2 (infraestructura base e ingesta) + Hito 4, primer tramo
- * (EventBridge -> Step Functions Standard por caseId). Sin Bedrock,
- * S3/evidencia en el flujo, SNS, Connect, Cognito, API Gateway ni frontend
- * todavia (ver docs/IMPLEMENTATION_ROADMAP.md). No instancia Thing ni
- * certificado X.509 (aprovisionamiento por dispositivo, fuera de CDK a
- * proposito: ver runbook de pre-despliegue).
+ * Hito 2 (infraestructura base e ingesta) + Hito 4 completo (EventBridge ->
+ * Step Functions Standard por caseId, seguido del transporte seguro de
+ * evidencia puntual: consentimiento, UPLOAD_EVIDENCE con URL prefirmada,
+ * callbacks MQTT y reconciliacion final). Sin Bedrock, SNS, Connect,
+ * Cognito, API Gateway, frontend ni check-in de voz/audio todavia (ver
+ * docs/IMPLEMENTATION_ROADMAP.md). No instancia Thing ni certificado X.509
+ * (aprovisionamiento por dispositivo, fuera de CDK a proposito: ver
+ * runbook de pre-despliegue).
  */
 export class SenseCareDemoStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
     const tables = new IngestionTables(this, "IngestionTables");
-    // Bucket de evidencia sin consumidores todavia (llega en Hito 4+).
-    new EvidenceBucket(this, "EvidenceBucket");
+    const evidenceBucket = new EvidenceBucket(this, "EvidenceBucket");
     const queues = new IngestionQueues(this, "IngestionQueues");
 
     const eventBus = new events.EventBus(this, "SenseCareEventBus", {
@@ -53,11 +58,30 @@ export class SenseCareDemoStack extends cdk.Stack {
     });
 
     const anomalyCases = new AnomalyCasesTable(this, "AnomalyCasesTable");
+    const evidenceCallbacks = new EvidenceCallbacksTable(this, "EvidenceCallbacksTable");
+    const evidenceCallbackQueues = new EvidenceCallbackQueues(this, "EvidenceCallbackQueues");
+
+    new EvidenceCallbackRules(this, "EvidenceCallbackRules", {
+      commandAcksQueue: evidenceCallbackQueues.commandAcks.queue,
+      evidenceQueue: evidenceCallbackQueues.evidence.queue,
+    });
+
+    new EvidenceCallbackHandlers(this, "EvidenceCallbackHandlers", {
+      commandAcksQueue: evidenceCallbackQueues.commandAcks.queue,
+      evidenceQueue: evidenceCallbackQueues.evidence.queue,
+      evidenceCallbacksTable: evidenceCallbacks.table,
+      eventLogTable: tables.eventLogTable,
+      evidenceBucket: evidenceBucket.bucket,
+    });
 
     new CaseOrchestration(this, "CaseOrchestration", {
       eventBus,
       openCaseLocksTable: tables.openCaseLocksTable,
       anomalyCasesTable: anomalyCases.table,
+      devicesTable: tables.devicesTable,
+      evidenceCallbacksTable: evidenceCallbacks.table,
+      eventLogTable: tables.eventLogTable,
+      evidenceBucket: evidenceBucket.bucket,
     });
 
     // Politica IoT declarativa y versionada, sin Thing/certificado/llave
@@ -65,11 +89,12 @@ export class SenseCareDemoStack extends cdk.Stack {
     // runbook de pre-despliegue).
     new DeviceAccessPolicy(this, "DeviceAccessPolicy");
 
-    // TODO(Hito 4 - Orquestacion, siguiente tramo): CheckCameraConsent,
-    // RequestEvidenceUpload y los estados de espera subsecuentes. Ese
-    // tramo debe renovar el TTL de OpenCaseLocks periodicamente mientras
-    // el caso siga abierto (este hito solo renueva una vez, al iniciar) y
-    // liberarlo/dejarlo expirar al cerrarlo.
+    // TODO(Hito 4 - Orquestacion, siguiente tramo): renovar el TTL de
+    // OpenCaseLocks periodicamente mientras el caso siga abierto (este
+    // hito solo renueva una vez, al iniciar) y liberarlo/dejarlo expirar
+    // al cerrarlo o escalarlo. El tramo de evidencia puntual (consentimiento,
+    // UPLOAD_EVIDENCE con URL prefirmada, callbacks MQTT y reconciliacion)
+    // ya esta implementado en CaseOrchestration.
 
     // TODO(Hito 5 - Control de demo): Cognito, API Gateway y Lambdas
     // minimas de consulta/cancelacion/escalamiento, mas el adaptador
@@ -84,6 +109,7 @@ export class SenseCareDemoStack extends cdk.Stack {
     // TODO(Hito 6 - Notificacion y llamada): SNS y Amazon Connect Customer
     // (Voice) via EscalationPolicy/EmergencyDialer, destino unicamente en
     // allowlist de demo, nunca 911. Incluye la alarma DLQ -> SNS pendiente
-    // (las 3 DLQ de este hito ya existen, sin alarma todavia).
+    // (las DLQ de ingesta, dispatcher y callbacks de evidencia ya existen,
+    // sin alarma todavia).
   }
 }

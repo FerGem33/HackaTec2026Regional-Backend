@@ -1,0 +1,20 @@
+{
+  "name": "@sensecare/evidence",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Transporte seguro de evidencia puntual (Hito 4, tramo evidencia): consentimiento, UPLOAD_EVIDENCE con URL prefirmada, callbacks MQTT con lease de resolucion, y reconciliacion final.",
+  "dependencies": {
+    "@sensecare/contracts": "*",
+    "@aws-sdk/client-dynamodb": "^3.686.0",
+    "@aws-sdk/lib-dynamodb": "^3.686.0",
+    "@aws-sdk/client-sfn": "^3.686.0",
+    "@aws-sdk/client-s3": "^3.686.0",
+    "@aws-sdk/s3-request-presigner": "^3.686.0",
+    "@aws-sdk/client-iot-data-plane": "^3.686.0"
+  },
+  "devDependencies": {
+    "aws-sdk-client-mock": "^4.1.0",
+    "@types/aws-lambda": "^8.10.145"
+  }
+}

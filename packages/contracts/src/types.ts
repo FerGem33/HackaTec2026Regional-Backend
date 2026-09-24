@@ -111,6 +111,7 @@ export type CommandAckReason =
   | "INVALID_S3_KEY"
   | "FRAME_NOT_AVAILABLE"
   | "INVALID_CASE"
+  | "COMMAND_CONFLICT"
   | "INTERNAL_ERROR";
 
 export interface CommandAck {

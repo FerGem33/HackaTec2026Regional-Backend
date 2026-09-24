@@ -393,6 +393,53 @@ Al recibirlo, `commands.py` debe:
 
 El `COMMAND_ACK` se publica en `command-acks`; el resultado final en `evidence`. Ambos incluyen `caseId` y su propio `eventId`.
 
+### Reintentos y reenvío de `UPLOAD_EVIDENCE` con el mismo `commandId`
+
+El backend puede reenviar el **mismo** `UPLOAD_EVIDENCE` (mismo `commandId`)
+más de una vez para el mismo caso, típicamente porque reintentó antes de
+recibir cualquier respuesta de la Pi. `commands.py` debe tratar dos mensajes
+con el mismo `commandId` como la **misma orden lógica** únicamente si
+coinciden exactamente: `caseId`, `command`, `reason`, `captureMode`, `s3Key`,
+`imageId` y `expiresAt`. `uploadUrl` queda explícitamente **fuera** de esa
+comparación: es el único campo que el backend puede renovar sin que la orden
+deje de ser la misma.
+
+Ciclo de vida de una orden, desde la Pi:
+
+- Una orden está **pendiente** desde que se recibe hasta que se publica
+  `EVIDENCE_UPLOADED` o `EVIDENCE_FAILED`.
+- `COMMAND_ACK accepted:true` confirma recepción, pero **no termina** la
+  orden.
+- `COMMAND_ACK accepted:false` sí **termina** la orden.
+- Mientras esté pendiente —incluso si ya se publicó `COMMAND_ACK
+  accepted:true`— la Pi puede reemplazar `uploadUrl` por la versión más
+  reciente del mismo `commandId`, sin recapturar el frame.
+- Una vez publicado `EVIDENCE_UPLOADED` o `EVIDENCE_FAILED`, `commands.py`
+  sólo reenvía esos resultados previos; no vuelve a subir ni a capturar.
+
+Reglas para `commands.py`:
+
+- **Si sólo cambia `uploadUrl` y la orden todavía está pendiente** (según la
+  definición anterior): reemplazar la URL guardada en memoria y
+  continuar/reintentar la misma carga con la URL nueva. No volver a
+  capturar un frame ni tratarlo como una segunda orden.
+- **Si la orden ya terminó** (`accepted:false`, o ya se publicó
+  `EVIDENCE_UPLOADED`/`EVIDENCE_FAILED`): reenviar exactamente los mismos
+  resultados que ya se publicaron, de forma idempotente. No repetir la
+  subida ni volver a capturar.
+- **Si cambia cualquier otro campo** (`caseId`, `command`, `reason`,
+  `captureMode`, `s3Key`, `imageId` o `expiresAt`): rechazar el comando
+  completo con `COMMAND_ACK` de `accepted:false` y el motivo
+  `COMMAND_CONFLICT`. No intentar adivinar cuál versión es la correcta.
+- **La Pi nunca extiende `expiresAt`.** Sólo el backend decide y firma el
+  plazo; `commands.py` únicamente lo valida (paso 1 ya existente), nunca lo
+  recalcula ni lo prolonga.
+
+La Pi conserva durante 15 minutos metadatos protegidos de `commandId`, huella
+de los campos inmutables y resultado final. No persiste `uploadUrl`, frames
+ni audio. Esto permite deduplicar tras un reinicio sin guardar material
+sensible.
+
 ## 9. Check-in de voz
 
 El check-in no es escucha ambiental. Sólo se activa al recibir un comando separado y válido, con texto predefinido o limitado y una duración máxima configurada.
