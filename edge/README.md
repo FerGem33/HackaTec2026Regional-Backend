@@ -6,26 +6,43 @@ lee el ESP32 por serial, aplica reglas locales con ventana temporal y publica
 por MQTT TLS a AWS IoT Core usando los mismos JSON Schema de
 [`../packages/contracts/schemas/`](../packages/contracts/schemas/).
 
-**Fuera de alcance de este esqueleto:** cámara, visión (`RiskFusionEngine`),
-check-in de voz y manejo de `UPLOAD_EVIDENCE`. Esas piezas requieren la cámara
-física y se agregan como módulos aparte (`camera.py`, `vision.py`,
-`commands.py`, `audio.py`) siguiendo la misma guía cuando haya cámara conectada.
+**Visión local y evidencia:** ya implementadas (`frame_source.py`,
+`ring_buffer.py`, `vision_detectors.py`, `risk_fusion.py`, `vision_service.py`,
+`commands.py`, `evidence.py`, `evidence_state.py`). La decisión de hardware de
+cámara (CSI/USB/celular) sigue pendiente: mientras no se elija un adaptador
+concreto, `main.py` sólo activa visión si `vision.fixtureFramesDir` apunta a
+una carpeta de JPEGs de prueba (ver sección 8 de este README); sin eso,
+publica `status` con `visionState: DEGRADED` y continúa la telemetría de
+sensores sin cambios.
+
+**Fuera de alcance todavía:** check-in de voz (`audio.py`) y persistencia
+local de órdenes `UPLOAD_EVIDENCE` tras un reinicio (hoy sólo en memoria).
 
 ## Estructura
 
 ```text
 edge/
-  requirements.txt
+  requirements.txt              # dependencias base (sensores/MQTT), sin cámara
+  requirements-vision.txt       # mediapipe/opencv/numpy, instalar sólo con cámara real
   config/example.yaml          # copiar a /etc/SenseCare/config.yaml en la Pi
   src/SenseCare_edge/
     config.py                  # carga y valida config.yaml, falla rapido si falta algo
     esp32_reader.py            # hilo que lee el serial y normaliza JSON -> contrato
     sensor_rules.py            # ventana + cooldown para POOR_AIR_QUALITY / TEMPERATURE_ALERT
-    mqtt_client.py             # MQTT TLS con reconexion y backoff
+    mqtt_client.py             # MQTT TLS con reconexion, backoff y suscripción a `commands`
     schemas.py                 # valida contra packages/contracts/schemas/*.json
+    frame_source.py            # abstracción de cámara (hardware pendiente) + fixture de pruebas
+    ring_buffer.py             # buffer de frames en RAM (10s) + frames "pineados" por eventId
+    vision_types.py            # dataclasses de observaciones de detectores
+    vision_detectors.py        # adaptadores MediaPipe (import perezoso) + monitor de salud de cámara
+    risk_fusion.py             # POSSIBLE_FALL / PERSON_PRONE_INACTIVE / UNEXPECTED_PERSON / POSSIBLE_SMOKE_OR_FIRE / CAMERA_TAMPERED
+    vision_service.py          # bucle de captura adaptativo 2fps base / 6fps ráfaga
+    evidence_state.py          # fingerprint/estado en memoria de órdenes UPLOAD_EVIDENCE
+    commands.py                # UPLOAD_EVIDENCE: ack, dedup/retry, COMMAND_CONFLICT
+    evidence.py                # PUT HTTP directo a la URL prefirmada
     main.py                    # arranque y loop principal
   systemd/SenseCare-edge.service
-  tests/test_sensor_rules.py
+  tests/
 ```
 
 ## 1. Mapeo de campos: tu ESP32 -> el contrato SenseCare
@@ -101,17 +118,77 @@ Deberías ver en el log: conexión a IoT Core, y cada
 certificado, revisa que la política IoT del `Thing` permita publicar en los
 topics de `config.yaml`.
 
-## 5. Correr las pruebas de las reglas de sensores
+## 5. Correr las pruebas
 
-Estas pruebas no necesitan hardware ni red; simulan lecturas y verifican que
-una lectura aislada nunca dispare una anomalía, que sí dispara tras sostenerse
-la ventana configurada, y que el cooldown evita reemitir de inmediato:
+Ninguna prueba necesita hardware, red ni `mediapipe` instalado: los
+detectores de visión usan Protocols con implementaciones falsas inyectables
+(ver `tests/test_risk_fusion.py`, `tests/test_integration_fixture.py`); los
+adaptadores reales de MediaPipe sólo se importan de forma perezosa dentro de
+sus propias clases (`vision_detectors.py`).
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## 6. Instalar como servicio systemd (arranque automático)
+Cubren: reglas de sensores (ventana + cooldown), `FrameSource`/`FrameRingBuffer`
+en RAM, los 5 candidatos de `RiskFusionEngine` (transición válida, frame
+aislado, inmovilidad sostenida, cooldown, zona armada, módulo de humo/fuego
+apagado por defecto, cámara degradada, timestamps fuera de orden), el ciclo
+de `UPLOAD_EVIDENCE` en `commands.py` (URL vencida, `s3Key` inválido,
+duplicado con URL renovada, `COMMAND_CONFLICT`, frame `BUFFERED` faltante) y
+una integración de punta a punta con `FixtureFrameSource` que confirma
+exactamente un `VISUAL_ANOMALY` sin imagen.
+
+## 6. Activar visión con un fixture (sin decidir hardware todavía)
+
+Mientras la cámara física no esté elegida, `vision.fixtureFramesDir` permite
+probar todo el pipeline (`vision_service.py`, `risk_fusion.py`,
+`commands.py`) con una carpeta de JPEGs capturados a mano, tal como pide la
+"prueba física inicial" de `docs/EDGE_IMPLEMENTATION_GUIDE.md`:
+
+```yaml
+topics:
+  visualAnomaly: SenseCare/v1/devices/pi-demo-01/visual/anomaly
+  commands: SenseCare/v1/devices/pi-demo-01/commands
+  commandAcks: SenseCare/v1/devices/pi-demo-01/command-acks
+  evidence: SenseCare/v1/devices/pi-demo-01/evidence
+vision:
+  fixtureFramesDir: /home/SenseCare/fixture-frames   # .jpg ordenados alfabéticamente
+  poseModelPath: /opt/SenseCare/models/pose.task
+  personModelPath: /opt/SenseCare/models/person.tflite
+  baseFps: 2
+  burstFps: 6
+riskFusion:
+  armedZones: ["entry"]
+```
+
+Sin `poseModelPath`/`personModelPath` apuntando a modelos reales instalados
+en `/opt/SenseCare/models` (fuera de Git, ver guía), el servicio arranca en
+`visionState: DEGRADED` y sigue publicando telemetría de sensores con
+normalidad — nunca inventa una anomalía ni aborta el proceso completo. Para
+correr el pipeline real hace falta además instalar
+`pip install -r requirements-vision.txt` dentro del venv de la Pi.
+
+> **Limitación de demo — una sola evidencia visual BUFFERED pendiente por
+> dispositivo:** `UPLOAD_EVIDENCE` no lleva el `eventId` de la
+> `VISUAL_ANOMALY` que originó el caso (sólo `caseId`), así que
+> `commands.py` no puede saber por el cable a cuál anomalía visual
+> corresponde una orden `BUFFERED` si hubiera más de una pendiente a la vez.
+> Por eso sólo se admite **una** reserva de evidencia visual a la vez
+> (`EvidenceCommandProcessor.try_reserve_visual_evidence`, con TTL propio,
+> configurable con `vision.visualEvidenceTtlSeconds`, default 90s): mientras
+> esté vigente, `vision_service.py` **suprime** cualquier otra anomalía
+> visual (no la publica, no pinea su frame) en vez de arriesgar entregar la
+> imagen equivocada a un caso — ver el contador
+> `anomaliesSuppressedPendingEvidence` en el heartbeat `status`. Esto es
+> correcto para el alcance actual del demo (una anomalía → un caso → una
+> orden de evidencia, en ese orden). Cambiar esto requeriría agregar un
+> campo de correlación explícito al contrato (por ejemplo `eventId` en
+> `UPLOAD_EVIDENCE`), lo cual **no se propone ni se implementa aquí** sin
+> aprobación previa del coordinador (ver también
+> `docs/EDGE_IMPLEMENTATION_GUIDE.md`, sección 8).
+
+## 7. Instalar como servicio systemd (arranque automático)
 
 ```bash
 sudo mkdir -p /opt/SenseCare/edge /var/lib/SenseCare
@@ -127,7 +204,7 @@ sudo systemctl enable --now SenseCare-edge
 journalctl -u SenseCare-edge -f
 ```
 
-## 7. Verificar de punta a punta
+## 8. Verificar de punta a punta
 
 1. En la consola de AWS IoT Core, abre el **MQTT test client** y suscríbete a
    `SenseCare/v1/devices/{deviceId}/telemetry` (con el rol/permiso adecuado).
@@ -141,11 +218,17 @@ journalctl -u SenseCare-edge -f
 
 ## Pendiente para dejarlo "completo" según la guía edge
 
-- `health.py` / topic `status` con heartbeat cada 60 s (hay una versión
-  mínima ya integrada en `main.py`; falta enriquecerla con temperatura de la
-  Pi, FPS de visión, etc. cuando exista cámara).
-- Cola local persistente para anomalías mientras no hay red (hoy, si MQTT está
-  desconectado, el evento simplemente no se publica y se pierde).
-- `camera.py`, `vision.py`, `risk_fusion.py`, `commands.py`, `evidence.py`,
-  `audio.py`: todo el pipeline visual y de evidencia, que depende de tener la
-  cámara física conectada.
+- Elegir el adaptador real de `FrameSource` (CSI/Picamera2, USB/V4L2 o
+  cámara de celular) tras la prueba física inicial; hoy sólo existe
+  `FixtureFrameSource` para pruebas y demo.
+- `audio.py`: check-in de voz (reproducir pregunta, grabar ≤8 s, subir
+  fragmento). Mientras no exista, dejar `audio.enabled: false` en el config.
+- Persistencia local de 15 minutos para órdenes `UPLOAD_EVIDENCE` y eventos
+  críticos tras un reinicio/desconexión (hoy `commands.py` y la cola de
+  anomalías viven sólo en memoria del proceso).
+- Enriquecer `status` con temperatura de la Pi (`vcgencmd measure_temp`);
+  las métricas de visión (FPS efectivo, p50/p95, frames) ya están en
+  `vision_service.py`.
+- Añadir un modelo TFLite validado de humo/fuego si se decide habilitar
+  `POSSIBLE_SMOKE_OR_FIRE` (hoy `NullSmokeFireDetector` nunca detecta nada,
+  a propósito).

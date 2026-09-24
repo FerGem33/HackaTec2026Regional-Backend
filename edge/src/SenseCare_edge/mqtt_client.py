@@ -11,6 +11,7 @@ import json
 import logging
 import random
 import time
+from typing import Callable, Dict
 
 import paho.mqtt.client as mqtt
 
@@ -32,14 +33,44 @@ class MqttPublisher:
         )
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
+        self._client.on_message = self._on_message
         self._connected = False
+        # topic -> handler para `commands` (unico topic cloud->Pi del contrato).
+        # Reconstruido en cada reconexion porque una sesion no persistente
+        # (clean session) de paho-mqtt no conserva suscripciones del broker.
+        self._subscriptions: Dict[str, Callable[[dict], None]] = {}
 
     def _on_connect(self, _client, _userdata, _flags, rc):
         self._connected = rc == 0
         if self._connected:
             logger.info("conectado a AWS IoT Core (%s)", self._endpoint)
+            for topic in self._subscriptions:
+                self._client.subscribe(topic, qos=self._qos)
         else:
             logger.error("fallo de conexion MQTT, rc=%s", rc)
+
+    def _on_message(self, _client, _userdata, message) -> None:
+        handler = self._subscriptions.get(message.topic)
+        if handler is None:
+            return
+        try:
+            payload = json.loads(message.payload.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            logger.warning("mensaje MQTT no-JSON descartado (topic=%s)", message.topic)
+            return
+        try:
+            handler(payload)
+        except Exception:  # noqa: BLE001 - un handler que falla no debe tumbar el hilo MQTT
+            logger.exception("handler de mensaje MQTT fallo (topic=%s)", message.topic)
+
+    def subscribe(self, topic: str, handler: Callable[[dict], None]) -> None:
+        """Registra `handler(payload_dict)` para `topic`. Solo se usa para
+        `commands` (cloud->Pi); el cliente nunca se suscribe a `#`/`+` ni a
+        topics de otros dispositivos (ver EDGE_IMPLEMENTATION_GUIDE.md,
+        seccion 7)."""
+        self._subscriptions[topic] = handler
+        if self._connected:
+            self._client.subscribe(topic, qos=self._qos)
 
     def _on_disconnect(self, _client, _userdata, rc):
         self._connected = False

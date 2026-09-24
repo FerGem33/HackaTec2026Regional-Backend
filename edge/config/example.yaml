@@ -36,3 +36,39 @@ sensorRules:
     windowSeconds: 60
     cooldownSeconds: 120
     ruleVersion: sensor-rules-v1
+
+# Vision local (opcional): descomentar solo cuando haya camara conectada o un
+# directorio de fixture para pruebas (ver README.md seccion 6). Sin este
+# bloque, el servicio arranca sin vision y publica solo telemetria/reglas de
+# sensores, igual que hasta ahora.
+# topics:
+#   visualAnomaly: SenseCare/v1/devices/pi-demo-01/visual/anomaly
+#   commands: SenseCare/v1/devices/pi-demo-01/commands
+#   commandAcks: SenseCare/v1/devices/pi-demo-01/command-acks
+#   evidence: SenseCare/v1/devices/pi-demo-01/evidence
+# vision:
+#   # Hardware de camara aun no decidido (CSI/USB/celular): usar un directorio
+#   # de fixture (.jpg ordenados) para pruebas/demo mientras tanto.
+#   fixtureFramesDir: /opt/SenseCare/fixture-frames
+#   poseModelPath: /opt/SenseCare/models/pose.task
+#   personModelPath: /opt/SenseCare/models/person.tflite
+#   smokeFireModelPath: null  # habilitar solo si se valida un modelo compatible
+#   anomalyThreshold: 0.80
+#   cooldownSeconds: 120
+#   ringBufferSeconds: 10
+#   baseFps: 2
+#   burstFps: 6
+#   burstDurationSeconds: 3
+#   # Solo se admite UNA evidencia visual BUFFERED pendiente a la vez por
+#   # dispositivo (UPLOAD_EVIDENCE no lleva el eventId original); pasado
+#   # este plazo sin que llegue el comando, la reserva y el frame pineado
+#   # se liberan solos (ver README.md).
+#   visualEvidenceTtlSeconds: 90
+#   zones:
+#     entry: { x0: 0.0, y0: 0.0, x1: 0.4, y1: 1.0 }
+#     living_room: { x0: 0.4, y0: 0.0, x1: 1.0, y1: 1.0 }
+# riskFusion:
+#   minConsistentFrames: 2
+#   proneInactiveSeconds: 12
+#   armedZones: ["entry"]
+#   armed: true

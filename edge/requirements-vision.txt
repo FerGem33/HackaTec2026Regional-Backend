@@ -1,0 +1,11 @@
+# Dependencias opcionales del pipeline de vision local (frame_source.py,
+# vision_detectors.py, vision_service.py). No se incluyen en requirements.txt
+# porque el hardware de camara (CSI/USB/celular) todavia no esta decidido
+# (ver docs/EDGE_IMPLEMENTATION_GUIDE.md); instalar solo cuando exista camara
+# y se vaya a correr vision_service, no para el esqueleto de sensores/MQTT.
+#
+# opencv-python-headless evita instalar dependencias de GUI innecesarias en
+# una Raspberry Pi headless.
+mediapipe==0.10.18
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
