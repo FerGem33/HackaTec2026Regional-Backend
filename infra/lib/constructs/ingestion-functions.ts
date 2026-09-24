@@ -52,12 +52,15 @@ export class IngestionFunctions extends Construct {
       PUBLISH_LEASE_SECONDS: String(props.publishLeaseSeconds ?? 10),
     };
 
+    // Sin reservedConcurrentExecutions: la cuenta debe conservar al menos
+    // 10 ejecuciones no reservadas, y reservar 5 por cada una de las 6
+    // Lambdas de SenseCare (3 aqui + 3 en CaseOrchestration) lo violaba.
+    // Usan el pool de concurrencia no reservada de la cuenta.
     const commonProps = {
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
       memorySize: 512,
       timeout: cdk.Duration.seconds(15),
-      reservedConcurrentExecutions: 5,
       bundling: { format: lambdaNodejs.OutputFormat.CJS, target: "node22" },
       handler: "handler",
     } satisfies Partial<lambdaNodejs.NodejsFunctionProps>;

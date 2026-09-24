@@ -1,14 +1,18 @@
 import * as cdk from "aws-cdk-lib";
 import * as events from "aws-cdk-lib/aws-events";
 import type { Construct } from "constructs";
-import { IngestionTables } from "./constructs/ingestion-tables.js";
-import { EvidenceBucket } from "./constructs/evidence-bucket.js";
-import { IngestionQueues } from "./constructs/ingestion-queues.js";
-import { IotIngestionRules } from "./constructs/iot-ingestion-rules.js";
-import { IngestionFunctions } from "./constructs/ingestion-functions.js";
-import { AnomalyCasesTable } from "./constructs/anomaly-cases-table.js";
-import { CaseOrchestration } from "./constructs/case-orchestration.js";
-import { DeviceAccessPolicy } from "./constructs/device-access-policy.js";
+// CDK ejecuta estas fuentes con ts-node en CommonJS (ver cdk.json). Las
+// extensiones .js funcionan tras compilar a dist/, pero no existen durante
+// `npx cdk list/synth/deploy` desde el source tree; imports sin extension
+// permiten que ts-node resuelva los .ts y que tsc emita require() correcto.
+import { IngestionTables } from "./constructs/ingestion-tables";
+import { EvidenceBucket } from "./constructs/evidence-bucket";
+import { IngestionQueues } from "./constructs/ingestion-queues";
+import { IotIngestionRules } from "./constructs/iot-ingestion-rules";
+import { IngestionFunctions } from "./constructs/ingestion-functions";
+import { AnomalyCasesTable } from "./constructs/anomaly-cases-table";
+import { CaseOrchestration } from "./constructs/case-orchestration";
+import { DeviceAccessPolicy } from "./constructs/device-access-policy";
 
 /**
  * Hito 2 (infraestructura base e ingesta) + Hito 4, primer tramo

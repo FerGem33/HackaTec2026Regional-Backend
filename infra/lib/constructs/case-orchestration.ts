@@ -47,12 +47,14 @@ export class CaseOrchestration extends Construct {
   constructor(scope: Construct, id: string, props: CaseOrchestrationProps) {
     super(scope, id);
 
+    // Sin reservedConcurrentExecutions: ver ingestion-functions.ts para el
+    // porque (la cuenta debe conservar al menos 10 ejecuciones Lambda no
+    // reservadas; reservar en las 6 Lambdas de SenseCare lo violaba).
     const commonFnProps = {
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
       memorySize: 512,
       timeout: cdk.Duration.seconds(15),
-      reservedConcurrentExecutions: 5,
       bundling: { format: lambdaNodejs.OutputFormat.CJS, target: "node22" },
       handler: "handler",
     } satisfies Partial<lambdaNodejs.NodejsFunctionProps>;

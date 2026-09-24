@@ -63,6 +63,20 @@ describe("CaseOrchestration", () => {
     });
   });
 
+  it("does not reserve concurrency on any orchestration Lambda", () => {
+    // La cuenta debe conservar al menos 10 ejecuciones Lambda no
+    // reservadas; reservar en cada una de las Lambdas de SenseCare lo
+    // violaba (fallo real de deploy). No declarar
+    // ReservedConcurrentExecutions en absoluto, no bajarlo a otro valor.
+    const { template } = synth();
+    const functions = template.findResources("AWS::Lambda::Function");
+    for (const fn of Object.values(functions)) {
+      expect(
+        (fn as { Properties: Record<string, unknown> }).Properties.ReservedConcurrentExecutions,
+      ).toBeUndefined();
+    }
+  });
+
   it("wires the ASL with a Retry on both tasks and a Catch to CaseRegistrationFailed", () => {
     const { template } = synth();
     const definition = parseStateMachineDefinition(template);
