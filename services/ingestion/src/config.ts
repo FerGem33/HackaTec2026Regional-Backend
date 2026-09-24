@@ -1,24 +1,4 @@
-export function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Falta la variable de entorno requerida: ${name}`);
-  }
-  return value;
-}
-
-function requirePositiveInt(name: string, defaultValue: number): number {
-  const raw = process.env[name];
-  if (raw === undefined) {
-    return defaultValue;
-  }
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(
-      `La variable de entorno ${name} debe ser un entero positivo; se recibio: "${raw}"`,
-    );
-  }
-  return parsed;
-}
+import { requireEnv, requirePositiveInt } from "./env.js";
 
 /**
  * Se valida en cold start: si falta una variable de entorno requerida, o si
