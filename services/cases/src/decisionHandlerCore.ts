@@ -25,6 +25,17 @@ const EVENT_TYPES: Record<AlertDecision, { applied: CaseActionEventType; noop: C
   },
 };
 
+function buildConflictMessage(result: { humanDecision: string; dialStatus?: string; conflictReason?: string }): string {
+  switch (result.conflictReason) {
+    case "CALL_ALREADY_IN_PROGRESS":
+      return `La llamada de emergencia ya ${result.dialStatus === "CALLED" ? "se completó" : "inició"}; no se puede cancelar ni cambiar la decisión.`;
+    case "OPPOSITE_DECISION_ALREADY_APPLIED":
+      return `El caso ya tiene una decisión distinta registrada: ${result.humanDecision}`;
+    default:
+      return "El caso ya tiene un estado en conflicto con la acción solicitada.";
+  }
+}
+
 /**
  * Nucleo compartido por cancelCaseHandler (CANCEL_ALERT) y
  * escalateCaseHandler (ESCALATE): mismo chequeo de autorizacion, misma
@@ -32,11 +43,11 @@ const EVENT_TYPES: Record<AlertDecision, { applied: CaseActionEventType; noop: C
  * misma auditoria incondicional en EventLog de CADA intento -- aplicado,
  * repetido (no-op) o rechazado por conflicto.
  *
- * En este hito, ESCALATE solo registra/adelanta la intencion humana: no
- * dispara ninguna llamada ni EscalationPolicy (eso es un hito posterior,
- * ver docs/IMPLEMENTATION_ROADMAP.md). CANCEL_ALERT tampoco detiene ningun
- * fallback todavia -- no existe uno en este hito -- pero deja
- * `alertStatus: CANCELLED` registrado para cuando lo haya.
+ * `humanDecision` es un campo DISTINTO de `notificationStatus` (SNS) y de
+ * `dialStatus` (llamada de EscalationPolicy/EmergencyDialer) -- ver
+ * alertDecision.ts. Una vez que `dialStatus` es DIALING/CALLED, esta ruta
+ * responde 409 con `conflictReason: CALL_ALREADY_IN_PROGRESS`: nunca finge
+ * haber cancelado una llamada que ya inicio.
  */
 export async function handleCaseDecision(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
@@ -67,7 +78,8 @@ export async function handleCaseDecision(
   await writeCaseActionEventLog({
     caseId,
     userId,
-    resultingAlertStatus: result.alertStatus,
+    resultingHumanDecision: result.humanDecision,
+    conflictReason: result.conflictReason,
     eventType:
       result.outcome === "APPLIED" ? eventTypes.applied : result.outcome === "NOOP" ? eventTypes.noop : eventTypes.rejected,
   });
@@ -75,10 +87,12 @@ export async function handleCaseDecision(
   if (result.outcome === "CONFLICT") {
     return jsonResponse(409, {
       caseId,
-      alertStatus: result.alertStatus,
-      error: `El caso ya tiene una decision distinta registrada: ${result.alertStatus}`,
+      humanDecision: result.humanDecision,
+      ...(result.dialStatus ? { dialStatus: result.dialStatus } : {}),
+      conflictReason: result.conflictReason,
+      error: buildConflictMessage(result),
     });
   }
 
-  return jsonResponse(200, { caseId, alertStatus: result.alertStatus });
+  return jsonResponse(200, { caseId, humanDecision: result.humanDecision });
 }

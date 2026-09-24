@@ -3,9 +3,12 @@
 Este documento cubre el hito de alertas: notificación SNS deduplicada por
 caso (`DispatchAlertFn`) y las 3 rutas humanas autenticadas
 (`GET /cases/{caseId}/events`, `POST /cases/{caseId}/cancel`,
-`POST /cases/{caseId}/escalate`). No incluye Amazon Connect ni telefonía:
-`ESCALATE` sólo registra la intención humana, y `CANCEL_ALERT` no detiene
-ningún fallback todavía porque no existe uno en este hito.
+`POST /cases/{caseId}/escalate`). El hito de escalamiento (espera de
+decisión humana, `EscalationPolicy` y `EmergencyDialer`) consume
+`humanDecision`/`dialStatus` tal como los deja este hito, pero su propio
+runbook (Amazon Connect, la instancia/contact flow/número de demo, el
+parámetro SSM) vive en
+[EMERGENCY_CALL_RUNBOOK.md](EMERGENCY_CALL_RUNBOOK.md) — no lo repitas aquí.
 
 ## 1. Qué se agregó al desplegar
 
@@ -19,11 +22,20 @@ ningún fallback todavía porque no existe uno en este hito.
   case-dispatcher), publicando a `SenseCare-OperationalAlarms`.
 - 3 rutas nuevas en el mismo `DemoIngestApi` (misma URL base, mismo JWT de
   Cognito ya usado por las rutas de Hito 5).
-- Campos nuevos en `SenseCare-AnomalyCases`: `alertStatus`
-  (`PENDING`/`SENT`/`FAILED`/`CANCELLED`/`ESCALATED`), `cancelledAt`,
-  `cancelledBy`, `escalatedAt`, `escalatedBy`. `AnomalyCases.status` (el
-  ciclo de vida gestionado por Step Functions) **no lo toca** nada de este
-  hito.
+- Campos nuevos en `SenseCare-AnomalyCases`, separados a propósito en 3
+  concerns distintos (un `sns:Publish` exitoso sólo prueba que SNS aceptó
+  el mensaje, nunca que un familiar lo leyó):
+  - `notificationStatus` (`PENDING`/`PUBLISHED`/`FAILED`): estado de la
+    publicación SNS, escrito únicamente por `DispatchAlertFn`.
+  - `humanDecision` (`CANCELLED`/`ESCALATED`, ausente si no hay decisión
+    aún): la decisión de un cuidador autorizado, más `cancelledAt`/
+    `cancelledBy`/`escalatedAt`/`escalatedBy`.
+  - `dialStatus` (`DIALING`/`CALLED`/`BLOCKED`, ausente si nunca se evaluó
+    el fallback): sólo lo escriben `EscalationPolicy`/`EmergencyDialer`/
+    `RecordCallOutcome` (ver EMERGENCY_CALL_RUNBOOK.md); ninguna ruta de
+    este hito lo toca.
+  `AnomalyCases.status` (el ciclo de vida gestionado por Step Functions)
+  **no lo toca** nada de este hito.
 
 ## 2. Confirmar las suscripciones de email (paso manual obligatorio)
 
@@ -81,8 +93,8 @@ suscripción y hay que agregarlas a mano (sección 2).
    sensibles: sólo `caseId`, `eventType`, `anomalyType`, `severity` si
    aplica, `occurredAt` y una instrucción fija).
 3. Confirmar en `SenseCare-Alerts` (tabla) que el `caseId` tiene
-   `alertStatus: "SENT"` y `notifiedCaregiverIds` con los `userId`
-   emparejados a ese `deviceId`.
+   `notificationStatus: "PUBLISHED"` y `notifiedCaregiverIds` con los
+   `userId` emparejados a ese `deviceId`.
 4. Repetir la misma anomalía (o dejar que ambos puntos de invocación de
    `DispatchAlertFn` corran para el mismo caso) y confirmar que **no** llega
    un segundo correo — sólo una publicación por caso.
@@ -113,12 +125,16 @@ Resultados esperados:
 | --- | --- |
 | Usuario sin `CaregiverAccess` sobre el `deviceId` del caso | `403`, sin datos del caso en el body |
 | `caseId` inexistente | `404` |
-| Repetir el mismo `cancel`/`escalate` | `200` idempotente, mismo `alertStatus` |
-| `cancel` después de que ya se aplicó `escalate` (o viceversa) | `409`, con el `alertStatus` real vigente |
+| Repetir el mismo `cancel`/`escalate` | `200` idempotente, mismo `humanDecision` |
+| `cancel` después de que ya se aplicó `escalate` (o viceversa) | `409`, `conflictReason: "OPPOSITE_DECISION_ALREADY_APPLIED"`, con el `humanDecision` real vigente |
+| `cancel` después de que `EscalationPolicy` ya reclamó `dialStatus: "DIALING"`/`"CALLED"` | `409`, `conflictReason: "CALL_ALREADY_IN_PROGRESS"` — nunca finge haber cancelado una llamada ya iniciada (ver EMERGENCY_CALL_RUNBOOK.md, carrera crítica) |
 | Cualquiera de los casos anteriores | Una fila nueva en `EventLog` con el intento (aplicado, no-op o rechazado) |
 
-Ningún resultado cierra `AnomalyCases.status` ni dispara una llamada: este
-hito termina en el registro de la decisión humana.
+Ningún resultado cierra `AnomalyCases.status` directamente: `cancel`
+resuelve de inmediato el callback de Step Functions en espera (si lo hay)
+y termina el fallback; `escalate` sólo dobla la intención humana —
+`EscalationPolicy` decide igual si el fallback procede (ver
+EMERGENCY_CALL_RUNBOOK.md).
 
 ## 5.1. Historial de casos (`GET /cases`) — hito de notificaciones
 
@@ -172,8 +188,6 @@ sin bloquear el resto del caso.
 - La entrega de SNS es por topic completo, no dirigida por caregiver:
   `notifiedCaregiverIds` es sólo auditoría de quién estaba autorizado al
   momento de alertar, no una lista de destinatarios reales de ese envío.
-- `ESCALATE` no tiene ningún efecto más allá de registrar la intención; no
-  existe todavía una `EscalationPolicy` ni `EmergencyDialer` que lo consuma.
 - `dispatchPushFn` (hito de notificaciones) NO tiene el mismo mecanismo de
   auto-recuperación que `dispatchAlertFn`: si la invocación que gana el
   `claim` muere entre reservarlo y llamar a Pinpoint, ese caso simplemente
@@ -184,3 +198,10 @@ sin bloquear el resto del caso.
   anunció que retira el **2026-10-30**. Seguro para el demo del hackathon;
   cualquier uso posterior a esa fecha necesita migrar (ver docstring de
   `infra/lib/constructs/push-application.ts`).
+- Mientras no haya un canal humano de notificación real confirmado
+  (`HUMAN_NOTIFICATION_CHANNEL_CONFIRMED=false`, el valor por defecto),
+  `EscalationPolicy` bloquea siempre el fallback automático con
+  `NO_ACTIVE_HUMAN_NOTIFICATION_CHANNEL`, sin importar que `notificationStatus`
+  sea `PUBLISHED`: un `sns:Publish` exitoso no prueba que un familiar la
+  leyó. Ver EMERGENCY_CALL_RUNBOOK.md para el detalle completo de
+  `EscalationPolicy`/`EmergencyDialer`.

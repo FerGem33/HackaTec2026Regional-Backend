@@ -422,6 +422,64 @@ necesitar `EventLog` caso por caso.
 
 **Criterio de salida:** la llamada real llega sólo al teléfono de prueba y ningún camino de la API/LLM permite escoger un número arbitrario.
 
+**Estado:** implementado en código/infra (sin deploy ni aprovisionamiento
+real de Connect todavía) — ver el detalle completo justo abajo en "Hito de
+escalamiento".
+
+### Hito de escalamiento — espera de decisión humana y llamada de fallback (implementado)
+
+**Objetivo:** dar al fallback telefónico de Hito 6 una espera determinista
+de decisión humana con callback de Step Functions, sin agente Bedrock ni
+check-in de voz (fuera de alcance de este hito — ver `decisionAgent` en
+`ARCHITECTURE_DETAILED.md`, todavía conceptual).
+
+- `RequestHumanDecisionFn` (`waitForTaskToken`) reemplaza el `Succeed`
+  terminal previo del tramo de análisis: persiste el `taskToken` en la
+  nueva tabla efímera `CaseActionCallbacks` (TTL) sólo si aún no hay
+  decisión; si `CANCEL_ALERT`/`ESCALATE` ya llegó antes de que la máquina
+  entrara en espera, resuelve su propio token de inmediato sin tocar esa
+  tabla. El `taskToken` **nunca** se copia a `AnomalyCases`/`EventLog`/
+  `Alerts`/el estado de la ejecución.
+- `cancelCaseFn`/`escalateCaseFn` (hito de alertas) ahora resuelven ese
+  callback de forma atómica dentro de la misma `TransactWriteItems` que ya
+  escribía `AnomalyCases`+`Alerts`, con reintento acotado ante un
+  `taskToken` obsoleto — ver `services/cases/src/alertDecision.ts`.
+- 3 campos separados en `AnomalyCases` en vez de un `alertStatus` genérico:
+  `notificationStatus`/`humanDecision`/`dialStatus` (ver
+  `ARCHITECTURE_DETAILED.md` sección 7 y EMERGENCY_CALL_RUNBOOK.md sección
+  1) — un `sns:Publish` exitoso nunca implica una alerta humana efectiva.
+- `EscalationPolicyFn`: determinista, sin permisos Connect, bloquea con un
+  código cerrado propio (`NO_ACTIVE_HUMAN_NOTIFICATION_CHANNEL`,
+  `NOTIFICATION_NOT_PUBLISHED`, `RISK_NOT_ELIGIBLE`, `CONSENT_MISSING`,
+  `DEVICE_NOT_ALLOWED`, `ALREADY_DIALED`, `CASE_CANCELLED`) y sólo entonces
+  reclama `dialStatus=DIALING` de forma atómica. Bloqueada por defecto por
+  `HUMAN_NOTIFICATION_CHANNEL_CONFIRMED=false` hasta que el operador
+  confirme un canal humano de notificación real (sin correo/push/WhatsApp
+  configurados todavía).
+- `EmergencyDialerFn`: única Lambda con `connect:StartOutboundVoiceContact`
+  (única excepción aceptada con `Resource:"*"`, esa acción no admite
+  permisos a nivel de recurso). Lee el destino de un solo parámetro SSM
+  `SecureString` con CMK propia; nunca lo loguea ni lo retorna.
+  `RecordCallOutcomeFn` (sin permisos Connect/SSM/KMS) audita el resultado.
+- Carrera crítica cubierta con condiciones DynamoDB simétricas: un
+  `CANCEL_ALERT` no puede ganar después de que `dialStatus=DIALING`, y
+  `EscalationPolicy` no puede reclamar `DIALING` después de
+  `humanDecision=CANCELLED`. Ver EMERGENCY_CALL_RUNBOOK.md sección 8.
+- Pendiente, deliberadamente manual y fuera de CDK: reclamar la instancia
+  Connect/contact flow/número de origen, fijar el valor real del parámetro
+  SSM, y confirmar el canal humano de notificación — ver
+  EMERGENCY_CALL_RUNBOOK.md.
+
+**Criterio de salida:** cubierto por las pruebas automatizadas de
+`infra/test/case-orchestration.test.ts` y `services/escalation/test/` —
+decisión antes/durante la espera, timeout llega a `EscalationPolicy`, sin
+doble llamada para el mismo `caseId`, consentimiento/allowlist/riesgo
+inválidos bloquean, `EmergencyDialer` nunca recibe el destino por
+argumento, ninguna Lambda salvo `EmergencyDialer` tiene permiso Connect, y
+el `taskToken` nunca aparece en logs/EventLog/AnomalyCases/estado. Falta
+únicamente la verificación manual con una instancia Connect real (ver
+EMERGENCY_CALL_RUNBOOK.md sección 9).
+
 ### Hito 7 — Pruebas de integración y ensayo
 
 **Objetivo:** demostrar comportamiento seguro ante fallos, no sólo el camino feliz.

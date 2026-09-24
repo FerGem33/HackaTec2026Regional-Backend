@@ -9,3 +9,4 @@ process.env.ALERTS_TOPIC_ARN ??= "arn:aws:sns:us-east-1:123456789012:SenseCare-A
 process.env.CAREGIVER_PUSH_ENDPOINTS_TABLE_NAME ??= "SenseCare-CaregiverPushEndpoints-test";
 process.env.ALERT_DELIVERIES_TABLE_NAME ??= "SenseCare-AlertDeliveries-test";
 process.env.PINPOINT_APPLICATION_ID ??= "test-pinpoint-application-id";
+process.env.CASE_ACTION_CALLBACKS_TABLE_NAME ??= "SenseCare-CaseActionCallbacks-test";

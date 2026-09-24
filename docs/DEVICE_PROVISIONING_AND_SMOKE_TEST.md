@@ -75,6 +75,25 @@ aws dynamodb update-item \
   --condition-expression "attribute_exists(deviceId)"
 ```
 
+`fallbackCallConsent` (hito de escalamiento, ver
+[EMERGENCY_CALL_RUNBOOK.md](EMERGENCY_CALL_RUNBOOK.md)) sigue exactamente el
+mismo patrón que `cameraConsent`: `EscalationPolicyFn` trata cualquier valor
+distinto de `true` booleano —incluida su ausencia— como consentimiento
+denegado (`CONSENT_MISSING`), y nunca permite el fallback automático de
+llamada sin él. Es un campo independiente; dar `cameraConsent: true` no
+otorga `fallbackCallConsent`.
+
+```bash
+aws dynamodb update-item \
+  --table-name SenseCare-Devices \
+  --region us-east-1 \
+  --profile default \
+  --key '{"deviceId":{"S":"pi-demo-01"}}' \
+  --update-expression "SET fallbackCallConsent = :consent" \
+  --expression-attribute-values '{":consent":{"BOOL":true}}' \
+  --condition-expression "attribute_exists(deviceId)"
+```
+
 ## 2. Crear Thing y certificado X.509
 
 Ejecutar fuera del repositorio. Los archivos de certificado no deben entrar a

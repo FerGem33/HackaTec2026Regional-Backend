@@ -19,4 +19,5 @@ export const casesConfig = {
   alertsTableName: requireEnv("ALERTS_TABLE_NAME"),
   eventLogTableName: requireEnv("EVENT_LOG_TABLE_NAME"),
   caregiverAccessTableName: requireEnv("CAREGIVER_ACCESS_TABLE_NAME"),
+  caseActionCallbacksTableName: requireEnv("CASE_ACTION_CALLBACKS_TABLE_NAME"),
 };

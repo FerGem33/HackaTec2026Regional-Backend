@@ -9,6 +9,7 @@ import {
 import { TransactionCanceledException } from "@aws-sdk/client-dynamodb";
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
 import { handler } from "../src/cancelCaseHandler.js";
+import { casesConfig } from "../src/casesConfig.js";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
@@ -29,6 +30,10 @@ function requestFor(caseId: string, userId = "user-1"): APIGatewayProxyEventV2Wi
   } as unknown as APIGatewayProxyEventV2WithJWTAuthorizer;
 }
 
+function cancelledTransaction() {
+  return new TransactionCanceledException({ message: "cancelled", $metadata: {}, CancellationReasons: [] });
+}
+
 const CASE_ID = "44444444-4444-4444-b444-444444444444";
 
 beforeEach(() => {
@@ -45,6 +50,9 @@ beforeEach(() => {
   ddbMock
     .on(GetCommand, { TableName: process.env.CAREGIVER_ACCESS_TABLE_NAME })
     .resolves({ Item: { userId: "user-1", deviceId: "pi-demo-01" } });
+  // Sin callback pendiente por defecto (la maquina de estados no llego al
+  // wait, o el caso aun no existe en esa fase).
+  ddbMock.on(GetCommand, { TableName: casesConfig.caseActionCallbacksTableName }).resolves({});
   ddbMock.on(PutCommand).resolves({}); // EventLog
 });
 
@@ -67,7 +75,7 @@ describe("cancelCaseHandler", () => {
     expect(result.statusCode).toBe(403);
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
     const body = JSON.parse(result.body as string);
-    expect(body).not.toHaveProperty("alertStatus");
+    expect(body).not.toHaveProperty("humanDecision");
   });
 
   it("applies CANCEL_ALERT and audits it in EventLog", async () => {
@@ -77,44 +85,60 @@ describe("cancelCaseHandler", () => {
 
     expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body as string);
-    expect(body).toEqual({ caseId: CASE_ID, alertStatus: "CANCELLED" });
+    expect(body).toEqual({ caseId: CASE_ID, humanDecision: "CANCELLED" });
 
     const auditPut = ddbMock.commandCalls(PutCommand)[0]?.args[0].input;
     expect(auditPut?.Item?.eventType).toBe("CANCEL_ALERT_APPLIED");
     expect(auditPut?.Item?.userId).toBe("user-1");
+    expect(auditPut?.Item?.resultingHumanDecision).toBe("CANCELLED");
   });
 
   it("repeating the same cancel is idempotent (200, audited as NOOP)", async () => {
-    ddbMock
-      .on(TransactWriteCommand)
-      .rejects(new TransactionCanceledException({ message: "cancelled", $metadata: {}, CancellationReasons: [] }));
+    ddbMock.on(TransactWriteCommand).rejects(cancelledTransaction());
     ddbMock.on(GetCommand, { TableName: process.env.ANOMALY_CASES_TABLE_NAME, ConsistentRead: true }).resolves({
-      Item: { caseId: CASE_ID, alertStatus: "CANCELLED" },
+      Item: { caseId: CASE_ID, humanDecision: "CANCELLED" },
     });
 
     const result = await callHandler(requestFor(CASE_ID));
 
     expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body as string);
-    expect(body.alertStatus).toBe("CANCELLED");
+    expect(body.humanDecision).toBe("CANCELLED");
 
     const auditPut = ddbMock.commandCalls(PutCommand)[0]?.args[0].input;
     expect(auditPut?.Item?.eventType).toBe("CANCEL_ALERT_NOOP");
   });
 
   it("a cancel that loses the race against a prior escalate returns 409 with the real state, audited as REJECTED", async () => {
-    ddbMock
-      .on(TransactWriteCommand)
-      .rejects(new TransactionCanceledException({ message: "cancelled", $metadata: {}, CancellationReasons: [] }));
+    ddbMock.on(TransactWriteCommand).rejects(cancelledTransaction());
     ddbMock.on(GetCommand, { TableName: process.env.ANOMALY_CASES_TABLE_NAME, ConsistentRead: true }).resolves({
-      Item: { caseId: CASE_ID, alertStatus: "ESCALATED" },
+      Item: { caseId: CASE_ID, humanDecision: "ESCALATED" },
     });
 
     const result = await callHandler(requestFor(CASE_ID));
 
     expect(result.statusCode).toBe(409);
     const body = JSON.parse(result.body as string);
-    expect(body.alertStatus).toBe("ESCALATED");
+    expect(body.humanDecision).toBe("ESCALATED");
+    expect(body.conflictReason).toBe("OPPOSITE_DECISION_ALREADY_APPLIED");
+
+    const auditPut = ddbMock.commandCalls(PutCommand)[0]?.args[0].input;
+    expect(auditPut?.Item?.eventType).toBe("CANCEL_ALERT_REJECTED");
+  });
+
+  it("a cancel attempted after EscalationPolicy already claimed DIALING returns 409 and never claims to have stopped the call", async () => {
+    ddbMock.on(TransactWriteCommand).rejects(cancelledTransaction());
+    ddbMock.on(GetCommand, { TableName: process.env.ANOMALY_CASES_TABLE_NAME, ConsistentRead: true }).resolves({
+      Item: { caseId: CASE_ID, dialStatus: "DIALING" },
+    });
+
+    const result = await callHandler(requestFor(CASE_ID));
+
+    expect(result.statusCode).toBe(409);
+    const body = JSON.parse(result.body as string);
+    expect(body.conflictReason).toBe("CALL_ALREADY_IN_PROGRESS");
+    expect(body.dialStatus).toBe("DIALING");
+    expect(body.error).toContain("inició");
 
     const auditPut = ddbMock.commandCalls(PutCommand)[0]?.args[0].input;
     expect(auditPut?.Item?.eventType).toBe("CANCEL_ALERT_REJECTED");

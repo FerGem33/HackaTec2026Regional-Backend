@@ -13,6 +13,15 @@ import type { CaseTaskInput } from "./types.js";
  * ("NotifyCaregiversIfNotAlready"). Ambas invocaciones llaman a esta MISMA
  * funcion; la idempotencia vive aqui, no en la maquina de estados.
  *
+ * `notificationStatus` (PENDING/PUBLISHED/FAILED) es deliberadamente un
+ * campo DISTINTO de `humanDecision` (CANCELLED/ESCALATED, escrito solo por
+ * services/cases/src/alertDecision.ts) y de `dialStatus` (DIALING/CALLED/
+ * BLOCKED, escrito solo por escalationPolicyFn.ts): un `sns:Publish`
+ * exitoso prueba que SNS aceptó el mensaje, NUNCA que un familiar lo leyó
+ * ni que existe un canal humano activo. Fusionar estos tres estados en un
+ * solo campo fue el diseño original y se corrigió explícitamente a pedido
+ * del coordinador antes de implementar el hito de escalamiento.
+ *
  * Dedup real (no solo "intentar evitar duplicados"): un `PutItem`
  * condicional `attribute_not_exists(caseId)` en Alerts es la unica reserva
  * atomica. Solo la invocacion que gana esa condicion llama a
@@ -20,9 +29,9 @@ import type { CaseTaskInput } from "./types.js";
  * camino feliz, o un reintento de Lambda) pierde la condicion y no publica
  * nada. Limite conocido: si la invocacion ganadora muere entre el PutItem y
  * el Publish, el registro queda `PENDING` -- la segunda invocacion lo
- * detecta (mismo caseId, `alertStatus` todavia `PENDING` y con mas de
- * `STALE_PENDING_MS` desde `createdAt`) y retoma el envio desde ahi, para
- * no depender de una tercera invocacion que quiza nunca llegue.
+ * detecta (mismo caseId, `notificationStatus` todavia `PENDING` y con mas
+ * de `STALE_PENDING_MS` desde `createdAt`) y retoma el envio desde ahi,
+ * para no depender de una tercera invocacion que quiza nunca llegue.
  *
  * Un fallo de `sns:Publish` se audita como `FAILED` y NUNCA se relanza como
  * excepcion: no debe fallar la ejecucion de Step Functions ni bloquear el
@@ -38,11 +47,11 @@ interface AlertItem {
   anomalyType: string;
   eventType: string;
   severity?: string;
-  alertStatus: "PENDING" | "SENT" | "FAILED";
+  notificationStatus: "PENDING" | "PUBLISHED" | "FAILED";
   notifiedCaregiverIds: string[];
   createdAt: string;
   updatedAt: string;
-  sentAt?: string;
+  publishedAt?: string;
   snsMessageId?: string;
 }
 
@@ -87,7 +96,7 @@ async function tryClaim(
           anomalyType: caseDetail.anomalyType,
           eventType: caseDetail.eventType,
           ...(caseDetail.severity ? { severity: caseDetail.severity } : {}),
-          alertStatus: "PENDING",
+          notificationStatus: "PENDING",
           notifiedCaregiverIds,
           createdAt: nowIso,
           updatedAt: nowIso,
@@ -113,8 +122,8 @@ async function tryClaim(
     }),
   );
   const existingItem = existing.Item as AlertItem | undefined;
-  if (!existingItem || existingItem.alertStatus !== "PENDING") {
-    return false; // ya SENT o FAILED: no reenviar, es el camino feliz normal
+  if (!existingItem || existingItem.notificationStatus !== "PENDING") {
+    return false; // ya PUBLISHED o FAILED: no reenviar, es el camino feliz normal
   }
   if (Date.now() - Date.parse(existingItem.createdAt) < STALE_PENDING_MS) {
     return false; // probablemente en curso ahora mismo por la otra invocacion
@@ -126,7 +135,7 @@ async function tryClaim(
         TableName: config.alertsTableName,
         Key: { caseId: caseDetail.caseId },
         UpdateExpression: "SET updatedAt = :now",
-        ConditionExpression: "alertStatus = :pending AND createdAt = :createdAt",
+        ConditionExpression: "notificationStatus = :pending AND createdAt = :createdAt",
         ExpressionAttributeValues: {
           ":now": nowIso,
           ":pending": "PENDING",
@@ -165,21 +174,21 @@ async function publishAndFinalize(caseDetail: CaseTaskInput["caseDetail"]): Prom
       }),
     );
 
-    const sentAt = new Date().toISOString();
+    const publishedAt = new Date().toISOString();
     await ddb.send(
       new UpdateCommand({
         TableName: config.alertsTableName,
         Key: { caseId: caseDetail.caseId },
         UpdateExpression:
-          "SET alertStatus = :sent, sentAt = :sentAt, snsMessageId = :messageId, updatedAt = :sentAt",
+          "SET notificationStatus = :published, publishedAt = :publishedAt, snsMessageId = :messageId, updatedAt = :publishedAt",
         ExpressionAttributeValues: {
-          ":sent": "SENT",
-          ":sentAt": sentAt,
+          ":published": "PUBLISHED",
+          ":publishedAt": publishedAt,
           ":messageId": result.MessageId ?? "unknown",
         },
       }),
     );
-    await mirrorAlertStatusOntoCase(caseDetail.caseId, "SENT");
+    await mirrorNotificationStatusOntoCase(caseDetail.caseId, "PUBLISHED");
   } catch (error) {
     console.error(
       JSON.stringify({
@@ -193,23 +202,26 @@ async function publishAndFinalize(caseDetail: CaseTaskInput["caseDetail"]): Prom
       new UpdateCommand({
         TableName: config.alertsTableName,
         Key: { caseId: caseDetail.caseId },
-        UpdateExpression: "SET alertStatus = :failed, updatedAt = :now",
+        UpdateExpression: "SET notificationStatus = :failed, updatedAt = :now",
         ExpressionAttributeValues: { ":failed": "FAILED", ":now": new Date().toISOString() },
       }),
     );
-    await mirrorAlertStatusOntoCase(caseDetail.caseId, "FAILED");
+    await mirrorNotificationStatusOntoCase(caseDetail.caseId, "FAILED");
     // Nunca relanzar: un fallo de SNS no debe fallar el caso ni bloquear el
     // resto de la ejecucion (evidencia/analisis siguen su curso normal).
   }
 }
 
-async function mirrorAlertStatusOntoCase(caseId: string, alertStatus: "SENT" | "FAILED"): Promise<void> {
+async function mirrorNotificationStatusOntoCase(
+  caseId: string,
+  notificationStatus: "PUBLISHED" | "FAILED",
+): Promise<void> {
   await ddb.send(
     new UpdateCommand({
       TableName: config.anomalyCasesTableName,
       Key: { caseId },
-      UpdateExpression: "SET alertStatus = :alertStatus",
-      ExpressionAttributeValues: { ":alertStatus": alertStatus },
+      UpdateExpression: "SET notificationStatus = :notificationStatus",
+      ExpressionAttributeValues: { ":notificationStatus": notificationStatus },
     }),
   );
 }

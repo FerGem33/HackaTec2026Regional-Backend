@@ -3,11 +3,12 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Acciones humanas autenticadas sobre un caso (hito de alertas): GET /cases/{caseId}/events, POST /cases/{caseId}/cancel, POST /cases/{caseId}/escalate.",
+  "description": "Acciones humanas autenticadas sobre un caso (hito de alertas + hito de escalamiento): GET /cases/{caseId}/events, POST /cases/{caseId}/cancel, POST /cases/{caseId}/escalate.",
   "dependencies": {
     "@sensecare/contracts": "*",
     "@aws-sdk/client-dynamodb": "^3.686.0",
-    "@aws-sdk/lib-dynamodb": "^3.686.0"
+    "@aws-sdk/lib-dynamodb": "^3.686.0",
+    "@aws-sdk/client-sfn": "^3.686.0"
   },
   "devDependencies": {
     "aws-sdk-client-mock": "^4.1.0",

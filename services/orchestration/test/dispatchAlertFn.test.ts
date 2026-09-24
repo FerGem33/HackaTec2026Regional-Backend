@@ -55,11 +55,11 @@ describe("dispatchAlertFn", () => {
 
     const putCall = ddbMock.commandCalls(PutCommand)[0]?.args[0].input;
     expect(putCall?.Item?.notifiedCaregiverIds).toEqual(["user-1", "user-2"]);
-    expect(putCall?.Item?.alertStatus).toBe("PENDING");
+    expect(putCall?.Item?.notificationStatus).toBe("PENDING");
     expect(putCall?.ConditionExpression).toBe("attribute_not_exists(caseId)");
   });
 
-  it("publishes exactly once and marks the alert SENT with the SNS messageId", async () => {
+  it("publishes exactly once and marks notificationStatus PUBLISHED with the SNS messageId (never humanDecision/dialStatus)", async () => {
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
 
@@ -79,24 +79,27 @@ describe("dispatchAlertFn", () => {
     expect(message).not.toHaveProperty("s3Key");
     expect(message).not.toHaveProperty("summary");
 
-    const sentUpdate = ddbMock
+    const publishedUpdate = ddbMock
       .commandCalls(UpdateCommand)
       .find((c) => c.args[0].input.TableName === config.alertsTableName);
-    expect(sentUpdate?.args[0].input.ExpressionAttributeValues?.[":sent"]).toBe("SENT");
-    expect(sentUpdate?.args[0].input.ExpressionAttributeValues?.[":messageId"]).toBe("sns-message-1");
+    expect(publishedUpdate?.args[0].input.ExpressionAttributeValues?.[":published"]).toBe("PUBLISHED");
+    expect(publishedUpdate?.args[0].input.ExpressionAttributeValues?.[":messageId"]).toBe("sns-message-1");
 
     const mirrorUpdate = ddbMock
       .commandCalls(UpdateCommand)
       .find((c) => c.args[0].input.TableName === config.anomalyCasesTableName);
-    expect(mirrorUpdate?.args[0].input.ExpressionAttributeValues?.[":alertStatus"]).toBe("SENT");
+    expect(mirrorUpdate?.args[0].input.ExpressionAttributeValues?.[":notificationStatus"]).toBe("PUBLISHED");
+    // notificationStatus nunca debe tocar humanDecision/dialStatus.
+    expect(mirrorUpdate?.args[0].input.UpdateExpression).not.toContain("humanDecision");
+    expect(mirrorUpdate?.args[0].input.UpdateExpression).not.toContain("dialStatus");
   });
 
-  it("does not publish a second time when the alert is already SENT (dedup by conditional PutItem)", async () => {
+  it("does not publish a second time when the alert is already PUBLISHED (dedup by conditional PutItem)", async () => {
     ddbMock.on(PutCommand).rejects(new ConditionalCheckFailedException({ message: "exists", $metadata: {} }));
     ddbMock.on(GetCommand).resolves({
       Item: {
         caseId: input.caseDetail.caseId,
-        alertStatus: "SENT",
+        notificationStatus: "PUBLISHED",
         createdAt: new Date().toISOString(),
       },
     });
@@ -112,7 +115,7 @@ describe("dispatchAlertFn", () => {
     ddbMock.on(GetCommand).resolves({
       Item: {
         caseId: input.caseDetail.caseId,
-        alertStatus: "PENDING",
+        notificationStatus: "PENDING",
         createdAt: new Date().toISOString(), // recien creado
       },
     });
@@ -126,7 +129,7 @@ describe("dispatchAlertFn", () => {
     const staleCreatedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString(); // 5 min de antiguedad
     ddbMock.on(PutCommand).rejects(new ConditionalCheckFailedException({ message: "exists", $metadata: {} }));
     ddbMock.on(GetCommand).resolves({
-      Item: { caseId: input.caseDetail.caseId, alertStatus: "PENDING", createdAt: staleCreatedAt },
+      Item: { caseId: input.caseDetail.caseId, notificationStatus: "PENDING", createdAt: staleCreatedAt },
     });
     ddbMock.on(UpdateCommand).resolves({});
 
@@ -134,10 +137,10 @@ describe("dispatchAlertFn", () => {
 
     expect(snsMock.commandCalls(PublishCommand)).toHaveLength(1);
     const reclaimUpdate = ddbMock.commandCalls(UpdateCommand)[0]?.args[0].input;
-    expect(reclaimUpdate?.ConditionExpression).toBe("alertStatus = :pending AND createdAt = :createdAt");
+    expect(reclaimUpdate?.ConditionExpression).toBe("notificationStatus = :pending AND createdAt = :createdAt");
   });
 
-  it("marks the alert FAILED and never throws when SNS publish fails (case stays intact)", async () => {
+  it("marks notificationStatus FAILED and never throws when SNS publish fails (case stays intact)", async () => {
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
     snsMock.on(PublishCommand).rejects(new Error("SNS unavailable"));
@@ -152,7 +155,7 @@ describe("dispatchAlertFn", () => {
     const mirrorUpdate = ddbMock
       .commandCalls(UpdateCommand)
       .find((c) => c.args[0].input.TableName === config.anomalyCasesTableName);
-    expect(mirrorUpdate?.args[0].input.ExpressionAttributeValues?.[":alertStatus"]).toBe("FAILED");
+    expect(mirrorUpdate?.args[0].input.ExpressionAttributeValues?.[":notificationStatus"]).toBe("FAILED");
   });
 
   it("omits severity from the SNS message for a VISUAL_ANOMALY case (no severity on the contract)", async () => {

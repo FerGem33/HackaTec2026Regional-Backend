@@ -15,7 +15,8 @@ export interface CaseActionLogEntry {
   caseId: string;
   eventType: CaseActionEventType;
   userId: string;
-  resultingAlertStatus: string;
+  resultingHumanDecision: string;
+  conflictReason?: string;
 }
 
 /**
@@ -40,7 +41,8 @@ export async function writeCaseActionEventLog(entry: CaseActionLogEntry): Promis
         eventType: entry.eventType,
         occurredAt,
         userId: entry.userId,
-        resultingAlertStatus: entry.resultingAlertStatus,
+        resultingHumanDecision: entry.resultingHumanDecision,
+        ...(entry.conflictReason !== undefined ? { conflictReason: entry.conflictReason } : {}),
       },
     }),
   );

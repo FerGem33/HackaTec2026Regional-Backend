@@ -1,0 +1,9 @@
+process.env.ANOMALY_CASES_TABLE_NAME ??= "SenseCare-AnomalyCases-test";
+process.env.DEVICES_TABLE_NAME ??= "SenseCare-Devices-test";
+process.env.EVENT_LOG_TABLE_NAME ??= "SenseCare-EventLog-test";
+process.env.HUMAN_NOTIFICATION_CHANNEL_CONFIRMED ??= "false";
+process.env.ESCALATION_ALLOWED_DEVICE_IDS ??= "pi-demo-01,sim-room-01";
+process.env.CONNECT_INSTANCE_ID ??= "11111111-1111-1111-1111-111111111111";
+process.env.CONNECT_CONTACT_FLOW_ID ??= "22222222-2222-2222-2222-222222222222";
+process.env.CONNECT_SOURCE_PHONE_NUMBER ??= "+10000000000";
+process.env.FALLBACK_CALL_DESTINATION_PARAMETER_NAME ??= "/sensecare/demo/fallback-call-destination-test";
