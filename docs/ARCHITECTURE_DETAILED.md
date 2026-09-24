@@ -141,12 +141,13 @@ Ejemplo de telemetría:
 ```json
 {
   "eventId": "01J...",
-  "timestamp": "2026-09-23T18:30:00Z",
+  "occurredAt": "2026-09-23T18:30:00Z",
   "temperatureC": 27.3,
   "humidityPct": 48.1,
   "co2Ppm": 840,
   "proximityCm": 120,
-  "motion": false,
+  "dbAvg": 42.5,
+  "dbPeak": 68.2,
   "firmwareVersion": "0.1.0"
 }
 ```

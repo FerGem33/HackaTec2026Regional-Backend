@@ -8,6 +8,6 @@ export default defineConfig({
       "services/*/test/**/*.test.ts",
       "infra/test/**/*.test.ts",
     ],
-    setupFiles: ["services/ingestion/test/setupEnv.ts"],
+    setupFiles: ["services/ingestion/test/setupEnv.ts", "services/orchestration/test/setupEnv.ts"],
   },
 });

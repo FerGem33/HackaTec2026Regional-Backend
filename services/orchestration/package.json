@@ -1,0 +1,17 @@
+{
+  "name": "@sensecare/orchestration",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Lambdas de orquestacion (Hito 4): despacho EventBridge -> Step Functions por caseId, renovacion de OpenCaseLocks y alta/actualizacion de AnomalyCases.",
+  "dependencies": {
+    "@sensecare/contracts": "*",
+    "@aws-sdk/client-dynamodb": "^3.686.0",
+    "@aws-sdk/lib-dynamodb": "^3.686.0",
+    "@aws-sdk/client-sfn": "^3.686.0"
+  },
+  "devDependencies": {
+    "aws-sdk-client-mock": "^4.1.0",
+    "@types/aws-lambda": "^8.10.145"
+  }
+}

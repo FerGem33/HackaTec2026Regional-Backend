@@ -15,6 +15,7 @@ export function generateTelemetry(deviceId: string): Telemetry {
     humidityPct: round1(35 + Math.random() * 30),
     co2Ppm: Math.round(500 + Math.random() * 900),
     proximityCm: Math.round(50 + Math.random() * 200),
-    motion: Math.random() > 0.7,
+    dbAvg: round1(30 + Math.random() * 30),
+    dbPeak: round1(50 + Math.random() * 40),
   };
 }

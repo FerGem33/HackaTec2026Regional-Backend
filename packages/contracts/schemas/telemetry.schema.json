@@ -29,7 +29,8 @@
     "humidityPct": { "type": "number", "minimum": 0, "maximum": 100 },
     "co2Ppm": { "type": "number", "minimum": 0, "maximum": 10000 },
     "proximityCm": { "type": "number", "minimum": 0, "maximum": 1000 },
-    "motion": { "type": "boolean" },
+    "dbAvg": { "type": "number", "minimum": 0, "maximum": 140 },
+    "dbPeak": { "type": "number", "minimum": 0, "maximum": 140 },
     "sourceTimestampUnavailable": { "type": "boolean" }
   },
   "required": ["eventId", "deviceId", "occurredAt", "firmwareVersion"],

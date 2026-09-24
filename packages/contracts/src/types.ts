@@ -23,7 +23,8 @@ export interface Telemetry {
   humidityPct?: number;
   co2Ppm?: number;
   proximityCm?: number;
-  motion?: boolean;
+  dbAvg?: number;
+  dbPeak?: number;
   sourceTimestampUnavailable?: boolean;
 }
 
@@ -149,3 +150,25 @@ export interface EvidenceFailed {
 }
 
 export type EvidenceResult = EvidenceUploaded | EvidenceFailed;
+
+export type AnomalyDetectedEventType = "VISUAL_ANOMALY" | "SENSOR_ANOMALY";
+export type AnomalyDetectedAnomalyType = VisualAnomalyType | SensorAnomalyType;
+
+/**
+ * Detalle publicado al bus EventBridge "SenseCare"
+ * (source: "SenseCare", detail-type: "anomaly.detected") por
+ * anomalyIngestCore (Hito 2). NO es un contrato de borde (MQTT/edge); es
+ * un evento interno backend-a-backend entre @sensecare/ingestion
+ * (productor) y @sensecare/orchestration (consumidor, Hito 4).
+ * caseDispatcherFn valida este detalle contra el schema antes de
+ * StartExecution.
+ */
+export interface AnomalyDetectedEventDetail {
+  caseId: CaseId;
+  deviceId: DeviceId;
+  recipientId: string;
+  eventId: Uuid;
+  eventType: AnomalyDetectedEventType;
+  anomalyType: AnomalyDetectedAnomalyType;
+  occurredAt: Iso8601Utc;
+}

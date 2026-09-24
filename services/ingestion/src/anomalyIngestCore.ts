@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
 import { PutEventsCommand } from "@aws-sdk/client-eventbridge";
-import type { SensorAnomaly, VisualAnomaly } from "@sensecare/contracts";
+import type { AnomalyDetectedEventDetail, SensorAnomaly, VisualAnomaly } from "@sensecare/contracts";
 import { ddb, eventBridge } from "./clients.js";
 import { config } from "./config.js";
 import { resolveRecipientId } from "./devices.js";
@@ -194,7 +194,7 @@ async function tryPublishWithLease(
             eventType: anomaly.eventType,
             anomalyType: anomaly.anomalyType,
             occurredAt: anomaly.occurredAt,
-          }),
+          } satisfies AnomalyDetectedEventDetail),
         },
       ],
     }),

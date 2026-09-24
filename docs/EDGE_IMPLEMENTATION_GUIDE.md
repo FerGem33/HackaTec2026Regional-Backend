@@ -185,7 +185,8 @@ Mensaje mínimo del ESP32:
   "humidityPct": 48.1,
   "co2Ppm": 840,
   "proximityCm": 120,
-  "motion": false
+  "dbAvg": 42.5,
+  "dbPeak": 68.2
 }
 ```
 

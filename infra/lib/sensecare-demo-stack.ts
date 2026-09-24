@@ -6,12 +6,17 @@ import { EvidenceBucket } from "./constructs/evidence-bucket.js";
 import { IngestionQueues } from "./constructs/ingestion-queues.js";
 import { IotIngestionRules } from "./constructs/iot-ingestion-rules.js";
 import { IngestionFunctions } from "./constructs/ingestion-functions.js";
+import { AnomalyCasesTable } from "./constructs/anomaly-cases-table.js";
+import { CaseOrchestration } from "./constructs/case-orchestration.js";
+import { DeviceAccessPolicy } from "./constructs/device-access-policy.js";
 
 /**
- * Hito 2: infraestructura base e ingesta. Sin Step Functions, Bedrock,
- * SNS, Connect, API Gateway, Cognito ni frontend todavia (ver
- * docs/IMPLEMENTATION_ROADMAP.md). No instancia Thing/certificado X.509
- * (aprovisionamiento por dispositivo, fuera de alcance de este hito).
+ * Hito 2 (infraestructura base e ingesta) + Hito 4, primer tramo
+ * (EventBridge -> Step Functions Standard por caseId). Sin Bedrock,
+ * S3/evidencia en el flujo, SNS, Connect, Cognito, API Gateway ni frontend
+ * todavia (ver docs/IMPLEMENTATION_ROADMAP.md). No instancia Thing ni
+ * certificado X.509 (aprovisionamiento por dispositivo, fuera de CDK a
+ * proposito: ver runbook de pre-despliegue).
  */
 export class SenseCareDemoStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -43,11 +48,23 @@ export class SenseCareDemoStack extends cdk.Stack {
       eventBus,
     });
 
-    // TODO(Hito 4 - Orquestacion): regla de EventBridge (source:
-    // "SenseCare", detail-type: "anomaly.detected") -> Step Functions
-    // Standard con nombre de ejecucion determinista = caseId (absorbe
-    // duplicados de la entrega "al menos una vez" de este hito). Debe
-    // renovar el TTL de OpenCaseLocks mientras el caso siga abierto y
+    const anomalyCases = new AnomalyCasesTable(this, "AnomalyCasesTable");
+
+    new CaseOrchestration(this, "CaseOrchestration", {
+      eventBus,
+      openCaseLocksTable: tables.openCaseLocksTable,
+      anomalyCasesTable: anomalyCases.table,
+    });
+
+    // Politica IoT declarativa y versionada, sin Thing/certificado/llave
+    // privada y sin adjuntarla a ningun principal (paso manual, ver
+    // runbook de pre-despliegue).
+    new DeviceAccessPolicy(this, "DeviceAccessPolicy");
+
+    // TODO(Hito 4 - Orquestacion, siguiente tramo): CheckCameraConsent,
+    // RequestEvidenceUpload y los estados de espera subsecuentes. Ese
+    // tramo debe renovar el TTL de OpenCaseLocks periodicamente mientras
+    // el caso siga abierto (este hito solo renueva una vez, al iniciar) y
     // liberarlo/dejarlo expirar al cerrarlo.
 
     // TODO(Hito 5 - Control de demo): Cognito, API Gateway y Lambdas

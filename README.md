@@ -99,6 +99,7 @@ Fuera de alcance:
 - [Configuración de subagentes para Claude Code](docs/CLAUDE_MULTIAGENT_SETUP.md)
 - [Guía de desarrollo del monorepo (contratos, pruebas, simulador)](docs/DEVELOPMENT.md)
 - [Guía de integración del simulador de demo](docs/SIMULATOR_INTEGRATION_GUIDE.md)
+- [Runbook del primer despliegue de integración](docs/FIRST_DEPLOYMENT_RUNBOOK.md)
 
 ## Estado
 

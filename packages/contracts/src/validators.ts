@@ -6,6 +6,7 @@ import {
   uploadEvidenceCommandSchema,
   commandAckSchema,
   evidenceResultSchema,
+  anomalyDetectedEventSchema,
 } from "./schemas.js";
 import type {
   Telemetry,
@@ -14,6 +15,7 @@ import type {
   UploadEvidenceCommand,
   CommandAck,
   EvidenceResult,
+  AnomalyDetectedEventDetail,
 } from "./types.js";
 
 const ajv = createAjv();
@@ -26,3 +28,6 @@ export const validateUploadEvidenceCommand = ajv.compile<UploadEvidenceCommand>(
 );
 export const validateCommandAck = ajv.compile<CommandAck>(commandAckSchema);
 export const validateEvidenceResult = ajv.compile<EvidenceResult>(evidenceResultSchema);
+export const validateAnomalyDetectedEvent = ajv.compile<AnomalyDetectedEventDetail>(
+  anomalyDetectedEventSchema,
+);

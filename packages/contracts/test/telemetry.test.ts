@@ -14,7 +14,8 @@ const baseValid: Telemetry = {
   humidityPct: 48.1,
   co2Ppm: 840,
   proximityCm: 120,
-  motion: false,
+  dbAvg: 42.5,
+  dbPeak: 68.2,
 };
 
 describe("Telemetry schema", () => {
@@ -54,6 +55,14 @@ describe("Telemetry schema", () => {
 
   it("rejects an out-of-range humidity reading", () => {
     expect(validateTelemetry({ ...baseValid, humidityPct: 140 })).toBe(false);
+  });
+
+  it("rejects an out-of-range dbPeak reading", () => {
+    expect(validateTelemetry({ ...baseValid, dbPeak: 200 })).toBe(false);
+  });
+
+  it("rejects the removed 'motion' field", () => {
+    expect(validateTelemetry({ ...baseValid, motion: false })).toBe(false);
   });
 
   it("rejects a calendar-invalid day (February 30th)", () => {

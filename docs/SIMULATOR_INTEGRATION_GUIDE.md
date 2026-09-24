@@ -100,7 +100,7 @@ Campos obligatorios:
 | `firmwareVersion` | SemVer, por ejemplo `0.1.0` o `simulator-1.0.0` no es válido; usar `1.0.0`. |
 
 Los sensores son opcionales en el contrato porque el hardware puede variar:
-`temperatureC`, `humidityPct`, `co2Ppm`, `proximityCm` y `motion`.
+`temperatureC`, `humidityPct`, `co2Ppm`, `proximityCm`, `dbAvg` y `dbPeak`.
 
 ```json
 {
@@ -112,7 +112,8 @@ Los sensores son opcionales en el contrato porque el hardware puede variar:
   "humidityPct": 46,
   "co2Ppm": 950,
   "proximityCm": 120,
-  "motion": false
+  "dbAvg": 42.5,
+  "dbPeak": 68.2
 }
 ```
 
