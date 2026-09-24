@@ -1,8 +1,8 @@
-# CareWatch
+# SenseCare
 
 Sistema ubicuo para monitorear y apoyar el cuidado consentido de una persona en su hogar. Proyecto para la categoría **Smart Software** de HackatecNM 2026.
 
-CareWatch usa una Raspberry Pi 4B como gateway del hogar: recibe señales auxiliares de un ESP32 y ejecuta localmente el primer detector de anomalías visuales. Una anomalía activa una investigación puntual: la Pi puede enviar una foto a AWS para análisis multimodal, pedir un check-in de voz y alertar a los familiares autorizados.
+SenseCare usa una Raspberry Pi 4B como gateway del hogar: recibe señales auxiliares de un ESP32 y ejecuta localmente detectores ligeros de riesgos visuales y reglas de sensores. Cualquiera de los dos detectores activa una investigación puntual: la Pi puede enviar una foto a AWS para análisis multimodal, pedir un check-in de voz y alertar a los familiares autorizados.
 
 No pretende diagnosticar enfermedades ni sustituir atención médica.
 
@@ -15,8 +15,8 @@ Una persona que requiere acompañamiento puede vivir sola o pasar periodos sin s
 El sistema evita capturas periódicas de cámara y audio. Sólo cuando una anomalía relevante abre un caso, reúne evidencia adicional y coordina una respuesta.
 
 ```text
-ESP32 → Raspberry Pi + visión local → anomalía → evidencia puntual a AWS
-                                      → IA + herramientas → check-in / alerta → fallback
+ESP32 → Raspberry Pi + visión local + reglas de sensores → anomalía → evidencia puntual a AWS
+                                                           → IA + herramientas → check-in / alerta → fallback
 ```
 
 El fallback consiste en una llamada al número de demo previamente autorizado —nunca al 911 durante el hackathon— y sólo como último recurso.
@@ -24,14 +24,14 @@ El fallback consiste en una llamada al número de demo previamente autorizado �
 ## Flujo del MVP
 
 1. El ESP32 entrega telemetría auxiliar a la Raspberry Pi por Wi-Fi local o serial.
-2. La Pi ejecuta continuamente un modelo ligero de visión. Sólo publica un evento cuando detecta una anomalía visual; no envía video continuo a la nube.
-3. AWS crea/reutiliza un `AnomalyCase` y Step Functions Standard coordina callbacks y plazos.
-4. Tras comprobar consentimiento de cámara, la Pi sube únicamente el frame puntual asociado al evento. Amazon Bedrock analiza la imagen, sensores y contexto. Puede:
+2. La Pi ejecuta continuamente modelos ligeros de visión y reglas locales de sensores. Detecta candidatos de riesgo —caída, persona inmóvil, persona inesperada, humo/fuego o fallo de cámara— y sólo publica un evento cuando la evidencia temporal supera un umbral; no envía video continuo a la nube.
+3. AWS crea/reutiliza un `AnomalyCase` y Step Functions Standard coordina callbacks y plazos. El simulador web de demo usa una API autenticada que produce los mismos eventos, sin recibir certificados de la Pi.
+4. Tras comprobar consentimiento de cámara, la Pi sube únicamente el frame puntual asociado al evento visual o un frame actual solicitado para un caso de sensor. Amazon Bedrock analiza la imagen, sensores y contexto. Puede:
    - Solicitar otra foto.
    - Pedir un check-in de voz y transcribir la respuesta.
    - Alertar a los familiares autorizados.
    - Solicitar escalamiento anticipado, sin poder cerrar un caso ni evitar el timeout.
-5. Si no hay respuesta humana válida de la persona ni de los familiares alertados antes de un plazo configurable, Step Functions invoca `EscalationPolicy`, que puede permitir una llamada al número demo autorizado.
+5. La respuesta de la persona aporta evidencia; si ningún familiar autorizado cancela explícitamente la alerta antes de un plazo configurable, Step Functions invoca `EscalationPolicy`, que puede permitir una llamada al número demo autorizado.
 
 ## Arquitectura
 
@@ -42,9 +42,9 @@ Servicios principales:
 | Componente | Propósito |
 | --- | --- |
 | ESP32 | Lectura de sensores auxiliares hacia la Raspberry Pi. |
-| Raspberry Pi 4B | Gateway, cámara/audio/bocina y primer detector visual local. |
+| Raspberry Pi 4B | Gateway, cámara/audio/bocina, fusión temporal de riesgos visuales y reglas de sensores. |
 | AWS IoT Core | Conectividad MQTT de la Raspberry Pi con certificado X.509. |
-| SQS + Lambda | Ingesta resiliente de telemetría y detección de anomalías. |
+| SQS + Lambda | Ingesta resiliente de telemetría, anomalías visuales y anomalías de sensores. |
 | DynamoDB | Estado, historial, perfiles, casos y eventos funcionales. |
 | EventBridge + Step Functions Standard | Inicio y orquestación durable de cada caso, con callbacks y plazos. |
 | S3 | Evidencia visual privada con retención corta. |
@@ -72,15 +72,17 @@ Antes de una llamada, la política exige como mínimo: riesgo alto, falta de res
 
 Incluido:
 
-- Telemetría IoT y reglas de anomalía.
+- Telemetría IoT consultable casi en tiempo real, reglas de anomalía visual y de sensores, y adaptador autenticado para simulador web.
 - Dashboard para familiares, alertas y confirmación de casos.
 - Detección visual local continua; foto puntual y análisis asistido sólo ante anomalía.
+- La animación del demo se reproduce en una pantalla y la observa la cámara real de la Pi; no existe un atajo de eventos visuales desde la animación a AWS.
 - Check-in de voz como evidencia.
 - Llamada de demostración a un número autorizado.
 
 Fuera de alcance:
 
 - Diagnósticos médicos.
+- Identificación de delincuentes, diagnóstico de desmayo o confirmación autónoma de incendio.
 - Llamadas reales al 911 o a servicios públicos de emergencia.
 - Audio o video continuo.
 - Reconocimiento facial e identificación biométrica.
@@ -92,6 +94,9 @@ Fuera de alcance:
 - [Especificación técnica detallada](docs/ARCHITECTURE_DETAILED.md)
 - [Diagrama AWS](diagrams/aws-architecture-mvp.svg)
 - [Cotización AWS reproducible](docs/AWS_COST_ESTIMATE.md)
+- [Roadmap de implementación y despliegue](docs/IMPLEMENTATION_ROADMAP.md)
+- [Guía de implementación edge: Raspberry Pi 4B + ESP32](docs/EDGE_IMPLEMENTATION_GUIDE.md)
+- [Configuración de subagentes para Claude Code](docs/CLAUDE_MULTIAGENT_SETUP.md)
 
 ## Estado
 

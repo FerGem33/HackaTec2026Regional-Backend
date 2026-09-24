@@ -1,4 +1,4 @@
-# CareWatch — Cotización AWS reproducible
+# SenseCare — Cotización AWS reproducible
 
 Estimación mensual para la arquitectura actual: ESP32 → Raspberry Pi 4B → AWS. La detección visual continua ocurre en la Pi; AWS recibe telemetría consolidada, eventos de anomalía y una foto puntual por caso para Amazon Bedrock.
 

@@ -1,8 +1,8 @@
-# CareWatch — Especificación detallada de arquitectura AWS
+# SenseCare — Especificación detallada de arquitectura AWS
 
 ## Alcance
 
-CareWatch monitoriza de forma consentida a una persona dentro de su hogar. El ESP32 entrega telemetría auxiliar a una Raspberry Pi 4B local. La Pi ejecuta el primer detector visual de anomalías, integra cámara/audio/sensores y es el único gateway hacia AWS. Sólo después de una anomalía y de comprobar consentimiento se sube una foto puntual para análisis multimodal en AWS.
+SenseCare monitoriza de forma consentida a una persona dentro de su hogar. El ESP32 entrega telemetría auxiliar a una Raspberry Pi 4B local. La Pi ejecuta el primer detector visual de anomalías y un motor de reglas locales de sensores, integra cámara/audio/sensores y es el único gateway hacia AWS. Sólo después de una anomalía visual o de sensor y de comprobar consentimiento se sube una foto puntual para análisis multimodal en AWS.
 
 La IA no realiza diagnósticos médicos. Puede solicitar escalamiento anticipado, pero una ejecución Step Functions Standard invoca la política de fallback al vencer el plazo aunque el modelo falle, no responda o no lo solicite.
 
@@ -10,9 +10,9 @@ La IA no realiza diagnósticos médicos. Puede solicitar escalamiento anticipado
 
 ```text
 Telemetría y detección inicial:
-ESP32 → Raspberry Pi (enlace local) → modelo de visión local + contexto de sensores
-                                      └→ IoT Core → IoT Rule → SQS → telemetryProcessor → DynamoDB
-                                                                  └→ EventBridge: AnomalyDetected
+ESP32 → Raspberry Pi (enlace local) → detectores visuales + RiskFusionEngine + reglas de sensores
+                                      └→ IoT Core → IoT Rules → SQS telemetry/anomaly → processors → DynamoDB
+                                                                                       └→ EventBridge: AnomalyDetected
 
 Investigación de anomalía:
 EventBridge → Step Functions Standard → CheckConsent → comando MQTT a Raspberry Pi → S3 privado
@@ -20,10 +20,11 @@ EventBridge → Step Functions Standard → CheckConsent → comando MQTT a Rasp
                               respuesta humana / evidenceCallback ← visionProcessor → Bedrock
 Step Functions → alerta a familia + check-in de voz → timeout → EscalationPolicy → Amazon Connect Customer (Voice)
 
-App familiar:
-Web o móvil → API Gateway → Lambda API → DynamoDB / URLs prefirmadas S3
-                    ↑
-                 Cognito
+Operador y simulador de demo:
+CLI/API → API Gateway → Lambda API → DynamoDB / URLs prefirmadas S3
+Simulador web autenticado (sólo sensores) → demoIngestHandler → misma SQS de eventos normalizados
+                              ↑
+                           Cognito
 ```
 
 Mantener todos los recursos en una misma región AWS reduce latencia, complejidad y costos de transferencia. Para el hackathon, `us-east-1` es una opción práctica si la cuenta tiene acceso al modelo de Bedrock elegido.
@@ -36,20 +37,70 @@ No es un servicio AWS: es el intermediario local entre hardware, cámara y nube.
 
 | Aspecto | Definición |
 | --- | --- |
-| Propósito | Recibir sensores ESP32, ejecutar visión local continua, retener sólo el frame de anomalía en memoria, reproducir preguntas y recibir respuesta de voz. |
+| Propósito | Recibir sensores ESP32, ejecutar detectores de riesgo visual por secuencia y reglas de sensores, retener sólo evidencia breve en memoria, reproducir preguntas y recibir respuesta de voz. |
 | Entrada | ESP32 por Wi-Fi local/HTTP/MQTT local/serial; cámara, micrófono, bocina y comandos desde IoT Core. |
-| Salida | Telemetría consolidada, evento visual de anomalía, foto puntual S3 mediante URL prefirmada, audio de check-in y `command-acks`. |
+| Salida | Telemetría consolidada, eventos visuales y de sensores, foto puntual S3 mediante URL prefirmada, audio de check-in y `command-acks`. |
 | Necesidad | Indispensable: es el gateway y primer detector del MVP. |
 | Sustitución futura | Hardware edge con más cómputo/acelerador para ejecutar también el análisis multimodal localmente. |
 
 Configuración recomendada:
 
 - Servicio local en Python o Node.js; procesos separados para adquisición ESP32, cámara/visión y MQTT.
-- Modelo ligero de visión cuantizado; medir FPS, latencia y temperatura en la Pi real. La detección local abre una anomalía; no se envía video continuo.
+- Modelos ligeros de visión cuantizados; medir FPS, latencia y temperatura en la Pi real. La detección visual abre una anomalía; no se envía video continuo.
+- Motor de reglas de sensores con rangos físicos, ventana temporal, histéresis y cooldown. Publica una anomalía de sensor sólo cuando una condición es sostenida/crítica; no reacciona a una lectura aislada.
 - Buffer local ante pérdida de internet.
 - Mantener un buffer circular exclusivamente en RAM de los últimos frames; borrar el frame una vez enviado o descartado. Fotos JPEG de 1280×720, idealmente menores a 1 MB.
 - Sin credenciales AWS estáticas: certificado X.509 de la Pi para IoT y URLs prefirmadas para S3. El ESP32 no recibe credenciales AWS.
 - Indicador visible cuando cámara o micrófono estén activos.
+
+### Detección visual amplia por secuencia
+
+La cámara real es la única fuente visual del demo. Puede observar una habitación física o una animación reproducida en una pantalla; en ambos casos los frames pasan por exactamente el mismo pipeline de la Pi. Un MP4/RTSP puede existir sólo como *fixture* interno de prueba, no como atajo de demo hacia la nube.
+
+```text
+cámara real → frames con timestamp → detectores ligeros → RiskFusionEngine
+                                                ├─ pose + tracking
+                                                ├─ persona/objeto + zonas
+                                                ├─ humo/fuego especializado (si existe)
+                                                └─ salud/oclusión de cámara
+                                                   ↓
+                               candidato visual + evidencia temporal → MQTT
+```
+
+`RiskFusionEngine` no emite diagnósticos ni acusaciones. Emite candidatos de riesgo:
+
+| Candidato | Evidencia local mínima | Límite del nombre |
+| --- | --- | --- |
+| `POSSIBLE_FALL` | Transición de pose vertical a horizontal y/o movimiento abrupto. | No confirma lesión. |
+| `PERSON_PRONE_INACTIVE` | Persona horizontal con falta de movimiento por ventana configurada. | No diagnostica desmayo. |
+| `UNEXPECTED_PERSON` | Persona en zona restringida, fuera de horario o con modo hogar armado. | No identifica ni acusa a alguien de robo. |
+| `POSSIBLE_SMOKE_OR_FIRE` | Detector especializado consistente en varios frames; sensores pueden reforzar. | No sustituye detector certificado. |
+| `CAMERA_TAMPERED` | Oclusión, cambio extremo de imagen, pérdida de frames o cámara desconectada. | Es un fallo técnico, no una emergencia médica. |
+
+Implementación inicial en Pi 4B:
+
+- Leer cámara a 640×480 o 720p y 5–8 FPS; usar timestamps monotónicos.
+- Ejecutar pose en cada 2–3 frames, detector de persona/zona a menor frecuencia y detector de humo/fuego sólo si hay modelo TFLite compatible. No cargar modelos pesados simultáneamente sin medir CPU, temperatura y latencia.
+- `RiskFusionEngine` mantiene estado por track/persona y zona: postura, movimiento, duración, conteo de personas, hora y estado armado. Exigir dos o más observaciones coherentes y un cooldown por tipo antes de publicar.
+- MediaPipe Pose Landmarker y Object Detector admiten video/live stream; el modo live puede omitir frames bajo carga, por lo que las reglas deben usar timestamps y no asumir un frame por intervalo. [Pose Landmarker](https://ai.google.dev/edge/api/mediapipe/python/mp/tasks/vision/PoseLandmarker) y [Object Detector](https://ai.google.dev/edge/mediapipe/solutions/vision/object_detector/python?hl=ko).
+- Retener únicamente un buffer circular de frames en RAM. Cuando el motor publica un candidato, asocia el mejor frame y sus métricas al `eventId`; el frame no viaja en MQTT.
+
+Contrato de salida visual:
+
+```json
+{
+  "eventId": "uuid",
+  "eventType": "VISUAL_ANOMALY",
+  "deviceId": "pi-demo-01",
+  "recipientId": "recipient-demo-01",
+  "occurredAt": "2026-09-23T18:30:00Z",
+  "anomalyType": "PERSON_PRONE_INACTIVE",
+  "confidence": 0.87,
+  "candidates": ["POSSIBLE_FALL", "POSSIBLE_UNCONSCIOUSNESS"],
+  "evidence": { "personCount": 1, "zone": "living_room", "horizontalSeconds": 14, "motionAfterSeconds": 12 },
+  "modelVersions": { "pose": "pose-v1", "person": "person-v1" }
+}
+```
 
 ---
 
@@ -59,7 +110,7 @@ AWS IoT Core es el punto de entrada MQTT seguro para dispositivos conectados.
 
 | Aspecto | Definición |
 | --- | --- |
-| Propósito | Recibir telemetría y anomalías visuales desde la Pi, y enviarle comandos. |
+| Propósito | Recibir telemetría y anomalías visuales/de sensores desde la Pi, y enviarle comandos. |
 | Entrada | MQTT TLS desde la Raspberry Pi. |
 | Salida | IoT Rules y comandos MQTT al gateway. |
 | Necesidad | Indispensable para el diseño IoT propuesto. |
@@ -67,12 +118,13 @@ AWS IoT Core es el punto de entrada MQTT seguro para dispositivos conectados.
 Topics iniciales:
 
 ```text
-carewatch/v1/devices/{deviceId}/telemetry
-carewatch/v1/devices/{deviceId}/visual/anomaly
-carewatch/v1/devices/{deviceId}/status
-carewatch/v1/devices/{deviceId}/command-acks
-carewatch/v1/devices/{deviceId}/commands
-carewatch/v1/devices/{deviceId}/evidence
+SenseCare/v1/devices/{deviceId}/telemetry
+SenseCare/v1/devices/{deviceId}/visual/anomaly
+SenseCare/v1/devices/{deviceId}/sensor/anomaly
+SenseCare/v1/devices/{deviceId}/status
+SenseCare/v1/devices/{deviceId}/command-acks
+SenseCare/v1/devices/{deviceId}/commands
+SenseCare/v1/devices/{deviceId}/evidence
 ```
 
 Configuración:
@@ -82,7 +134,7 @@ Configuración:
 - QoS 1 para telemetría importante.
 - Cada mensaje debe llevar `eventId` UUID y `timestamp` UTC.
 - La política IoT debe permitir únicamente conectar, publicar y suscribirse a topics pertenecientes al propio dispositivo.
-- Nunca conceder acceso amplio como `carewatch/#`.
+- Nunca conceder acceso amplio como `SenseCare/#`.
 
 Ejemplo de telemetría:
 
@@ -105,20 +157,20 @@ Opcional después: Device Shadow para configuración deseada, como volumen o mod
 
 ## 3. IoT Rule
 
-Se necesitan reglas IoT separadas para telemetría, `command-acks` y evidencia. La regla de telemetría no procesa respuestas del gateway.
+Se necesitan reglas IoT separadas para telemetría, anomalía visual, anomalía de sensor, `command-acks` y evidencia. La regla de telemetría no procesa respuestas del gateway.
 
 | Aspecto | Definición |
 | --- | --- |
 | Propósito | Separar la red de dispositivos del procesamiento de negocio. |
-| Entrada | `carewatch/v1/devices/+/telemetry`, `+/visual/anomaly`, `+/command-acks` y `+/evidence`. |
-| Salida | SQS para telemetría/anomalías y Lambdas de callback para comandos/evidencia. |
+| Entrada | `SenseCare/v1/devices/+/telemetry`, `+/visual/anomaly`, `+/sensor/anomaly`, `+/command-acks` y `+/evidence`. |
+| Salida | SQS separadas para telemetría/anomalías y Lambdas de callback para comandos/evidencia. |
 | Necesidad | Indispensable dentro de esta arquitectura. |
 
 Consulta inicial:
 
 ```sql
 SELECT *, topic() AS mqttTopic, timestamp() AS receivedAt
-FROM 'carewatch/v1/devices/+/telemetry'
+FROM 'SenseCare/v1/devices/+/telemetry'
 ```
 
 Configuración:
@@ -126,6 +178,7 @@ Configuración:
 - Usar versión SQL `2016-03-23`.
 - Acción de telemetría: `sqs:SendMessage` a `telemetry-queue`.
 - Acción de anomalía visual: `sqs:SendMessage` a `anomaly-queue` con `eventType`, `confidence`, `modelVersion`, métricas de postura/movimiento y contexto de sensores; nunca frames ni video en MQTT.
+- Acción de anomalía de sensor: `sqs:SendMessage` a `anomaly-queue` con `anomalyType`, severidad propuesta, regla/versiones, ventana de lecturas y contexto; nunca fotos ni audio en MQTT.
 - Acción de `command-acks`: invocar `commandCallbackHandler`, que valida `caseId` y llama `SendTaskSuccess`/`SendTaskFailure` con el token asociado.
 - Acción de evidencia: invocar `evidenceCallbackHandler`, que valida la llave S3 y reanuda la ejecución correspondiente.
 - Acción de error para visibilidad de fallos.
@@ -201,8 +254,12 @@ No es un servicio independiente: vive dentro de `telemetryProcessor`.
 
 | Condición | Resultado |
 | --- | --- |
-| Temperatura alta sostenida | Alerta `warning`. |
-| CO₂ alto sostenido | Alerta `warning`. |
+| Temperatura alta sostenida o ascenso rápido | `TEMPERATURE_ALERT`; `warning` o severidad configurada. |
+| CO₂ alto sostenido | `POOR_AIR_QUALITY` / `warning`; indicador de ventilación, no de CO, gas o incendio. |
+| Sensor específico de CO alto | `POSSIBLE_CO_EXPOSURE` / `critical` de demostración; alerta humana inmediata. |
+| Sensor específico de gas combustible alto | `POSSIBLE_GAS_LEAK` / `critical` de demostración; alerta humana inmediata. |
+| Sensor de humo/temperatura/llama con regla compuesta | `POSSIBLE_FIRE` / `critical` de demostración; alerta humana inmediata. |
+| Lectura imposible, sensor desconectado o sin calibración | `SENSOR_FAULT`; caso técnico, sin llamada automática. |
 | Raspberry Pi publica `visual/anomaly.detected` | Abre caso `POSSIBLE_FALL` / `critical` con evidencia local y sensores auxiliares. |
 | Sin movimiento durante `N` minutos en horario activo | Señal auxiliar para confirmar/elevar una anomalía visual. |
 | Sin telemetría durante 10 minutos | Watchdog programado abre caso `DEVICE_OFFLINE`; no depende de que llegue otra lectura. |
@@ -224,7 +281,9 @@ Ejemplo de alerta:
 }
 ```
 
-Las reglas usan el `timestamp` de la Pi, no el orden de llegada a SQS. La detección visual local es el disparador principal; sensores ambientales/de presencia aportan evidencia contextual. Antes de crear un caso, `telemetryProcessor`/`anomalyProcessor` intenta un `PutItem` condicional en `OpenCaseLocks` con clave `recipientId#anomalyType`; si ya existe un caso abierto, añade evidencia al existente. Sólo quien obtiene el candado crea `AnomalyCase` y publica `carewatch.anomaly.detected`.
+Las reglas usan el `timestamp` de la Pi, no el orden de llegada a SQS. La detección visual y las anomalías de sensores son disparadores pares; cada una aporta contexto a la otra. Una regla de sensor requiere ventana de tiempo, histéresis/cooldown y validación de rango. Antes de crear un caso, `telemetryProcessor`/`anomalyProcessor` intenta un `PutItem` condicional en `OpenCaseLocks` con clave `recipientId#anomalyType`; si ya existe un caso abierto, añade evidencia al existente. Sólo quien obtiene el candado crea `AnomalyCase` y publica `SenseCare.anomaly.detected`.
+
+Los sensores del prototipo son demostrativos: no se certifican como detector de humo, CO o gas ni se validan con llama, fugas o combustión real. CO₂ se interpreta como ventilación; riesgos de CO, combustible o fuego requieren el tipo de sensor específico y la calibración/instalación de su fabricante. El LLM puede añadir contexto visual, pero no rebaja automáticamente una severidad `critical` emitida por una regla de sensor. Referencias: [CDC/NIOSH sobre CO₂ y ventilación](https://www.cdc.gov/niosh/ventilation/faq/index.html) y [CDC sobre monóxido de carbono](https://www.cdc.gov/carbon-monoxide/es/about/informacion-basica-sobre-el-monoxido-de-carbono.html).
 
 ---
 
@@ -281,7 +340,7 @@ S3 almacena las fotos de forma privada.
 
 Configuración:
 
-- Bucket privado: `carewatch-private-images-{account}-{region}`.
+- Bucket privado: `SenseCare-private-images-{account}-{region}`.
 - Bloqueo de acceso público completo.
 - SSE-S3 para hackathon; SSE-KMS en producción.
 - Prefijo de entrada:
@@ -378,7 +437,7 @@ SNS entrega alertas a usuarios o a otros sistemas.
 
 Configuración:
 
-- Topic: `carewatch-alerts`.
+- Topic: `SenseCare-alerts`.
 - Publicar sólo alertas deduplicadas.
 - Email confirmado para demo.
 - Push móvil para producción.
@@ -400,7 +459,7 @@ Cognito gestiona usuarios y emite tokens JWT.
 
 Configuración:
 
-- User Pool: `carewatch-users`.
+- User Pool: `SenseCare-users`.
 - Inicio de sesión por email.
 - Verificación de email obligatoria.
 - App client SPA/móvil sin client secret.
@@ -429,6 +488,10 @@ Rutas:
 
 ```text
 GET  /me/recipients
+GET  /devices/{deviceId}/latest
+GET  /devices/{deviceId}/telemetry
+GET  /cases/{caseId}/events
+POST /demo/devices/{deviceId}/events
 GET  /recipients/{recipientId}/dashboard
 GET  /recipients/{recipientId}/telemetry
 GET  /recipients/{recipientId}/alerts
@@ -449,6 +512,7 @@ Configuración:
 - No configurar logs de acceso centralizados en este MVP; `EventLog` conserva la auditoría funcional de acciones de usuario y casos.
 - La URL de carga no es una ruta de la app: `captureEvidence` crea una URL PUT prefirmada y la envía junto con `caseId`, llave S3 y vencimiento en el comando MQTT. El gateway no necesita Cognito.
 - Validar en Lambda que cada `recipientId` pertenece al usuario autenticado.
+- `POST /demo/devices/{deviceId}/events` requiere un claim/grupo `demo-operator`, allowlist de dispositivos demo y rate limit; reutiliza validadores y SQS, no acepta eventos de dispositivos de producción ni comandos.
 
 ---
 
@@ -482,7 +546,7 @@ Esta capa convierte una anomalía en una ejecución durable por `caseId`. EventB
 | Aspecto | Definición |
 | --- | --- |
 | Propósito | Ejecutar un caso de punta a punta y mantener sus plazos. |
-| Entrada | `carewatch.anomaly.detected` desde EventBridge. |
+| Entrada | `SenseCare.anomaly.detected` desde EventBridge. |
 | Salida | Comandos de evidencia, alertas, callbacks y `EmergencyDialer`. |
 | Necesidad | Indispensable. Usar tipo `STANDARD`, no Express. |
 
@@ -501,6 +565,7 @@ La Pi detectó localmente la anomalía y conserva el frame asociado sólo en mem
   "caseId": "case-uuid",
   "command": "UPLOAD_EVIDENCE",
   "reason": "LOCAL_VISUAL_ANOMALY",
+  "captureMode": "BUFFERED",
   "s3Key": "raw-images/recipient-123/case-uuid/image-uuid.jpg",
   "uploadUrl": "https://...",
   "expiresAt": "2026-09-23T18:35:00Z"
@@ -509,11 +574,36 @@ La Pi detectó localmente la anomalía y conserva el frame asociado sólo en mem
 
 Configuración:
 
-- Regla EventBridge precisa: `source: carewatch`, `detail-type: anomaly.detected`; target: `StartExecution` con nombre `caseId`.
+- Regla EventBridge precisa: `source: SenseCare`, `detail-type: anomaly.detected`; target: `StartExecution` con nombre `caseId`.
 - `RequestEvidenceUpload`: callback máximo de 60 s. `commandCallbackHandler` y `evidenceCallbackHandler` validan los mensajes IoT y devuelven `SendTaskSuccess`/`SendTaskFailure`.
+- Para un caso de sensor sin frame visual asociado, `reason` es `SENSOR_ANOMALY` y `captureMode` es `CURRENT`: la Pi toma un único frame fresco sólo después del comando y consentimiento. Para el caso visual usa `BUFFERED`; la Pi no toma una foto adicional por defecto.
 - Si no hay ack/foto, guardar `evidenceIncomplete=true` y continuar a alerta/check-in; nunca interpretarlo como `safe`.
-- `WaitForResponse`: callbacks de persona/familia con `TimeoutSeconds = x`. La primera respuesta válida reanuda el flujo; el timeout pasa obligatoriamente a `EscalationPolicy`.
+- `WaitForResponse`: el check-in de persona se registra como evidencia y un `CANCEL_ALERT`/`ESCALATE` de familiar autorizado reanuda la decisión. Sólo `CANCEL_ALERT` detiene fallback; el timeout pasa obligatoriamente a `EscalationPolicy`.
 - Configurar `Retry` para errores transitorios y `Catch` para convertir fallas de modelo/foto en incertidumbre. No poner foto, audio, token ni perfil médico en el estado de la ejecución.
+
+### Telemetría consultable casi en tiempo real
+
+`telemetryProcessor` escribe la lectura normalizada en `Telemetry` y actualiza atómicamente `Devices.lastState`, `lastSeenAt` y los indicadores de salud. La API/CLI de demo expone:
+
+```text
+GET /devices/{deviceId}/latest
+GET /devices/{deviceId}/telemetry?from=<UTC>&to=<UTC>&limit=<n>
+GET /cases/{caseId}/events
+```
+
+El primero consulta `Devices` para una respuesta rápida; el segundo usa `Query` por `deviceId`/rango temporal; el tercero usa `EventLog`. El perfil de demostración publica telemetría cada cinco segundos y la CLI puede consultar cada 2–5 segundos. Esta es una visualización casi en tiempo real, no una garantía de latencia dura: SQS preserva entrega/reintentos aunque añada segundos.
+
+Para depuración del equipo, AWS IoT MQTT Test Client puede suscribirse a un topic de un dispositivo concreto. No exponer suscripciones MQTT de telemetría directamente a usuarios finales ni poner PII en nombres de topic.
+
+### Adaptador del simulador web
+
+El simulador de habitación no recibe certificado X.509 de la Pi. Publica por HTTPS autenticado a:
+
+```text
+POST /demo/devices/{deviceId}/events
+```
+
+`demoIngestHandler` sólo acepta `deviceId` de allowlist `demo`, valida exactamente los mismos schemas de `telemetry`, `visual/anomaly` y `sensor/anomaly`, asigna identidad de actor `demo-simulator`, y envía el mensaje normalizado a la misma SQS que usan las IoT Rules. No puede publicar comandos a la Pi ni seleccionar teléfonos. De esta manera, la simulación de caída, incendio, intoxicación o intrusión ejercita el mismo `anomalyProcessor`, deduplicación y Step Functions que el demo físico.
 
 ### Watchdog de ausencia de telemetría
 
@@ -535,12 +625,12 @@ El reconocimiento facial y las sugerencias de perfil quedan fuera del MVP: eleva
 
 ### Check-in, alertas y llamada de fallback
 
-La máquina inicia simultáneamente un check-in de voz y una alerta a todos los familiares activos del paciente. La persona puede responder desde el gateway; cualquier familiar autorizado puede responder desde la aplicación. Las preferencias permiten alertar a todos en paralelo para el demo o usar prioridad/secuencia. Una respuesta válida es un check-in explícito que responde a la pregunta esperada, o una acción firmada de familiar `SAFE`, `CONTACTING` o `ESCALATE`. Sólo una respuesta humana puede resolver o llevar a revisión el caso.
+La máquina inicia simultáneamente un check-in de voz y una alerta a todos los familiares activos del paciente. La persona puede responder desde el gateway; cualquier familiar autorizado puede responder mediante API/CLI de demo. Las preferencias permiten alertar a todos en paralelo para el demo o usar prioridad/secuencia. El check-in explícito se registra como evidencia; una acción firmada de familiar puede ser `CANCEL_ALERT` o `ESCALATE`. Sólo `CANCEL_ALERT` detiene el fallback.
 
 Al vencer el plazo `x`, `EscalationPolicy` evalúa de forma determinista:
 
 1. El caso sigue abierto y su riesgo es alto.
-2. No existe respuesta válida de la persona ni confirmación de ninguno de los familiares alertados.
+2. No existe `CANCEL_ALERT` de ninguno de los familiares alertados antes del plazo.
 3. El consentimiento de llamada de fallback sigue vigente.
 4. El número de destino está en una lista permitida y corresponde al contacto de demo configurado, nunca a 911.
 5. No existe ya una llamada para ese `caseId` (idempotencia).
@@ -573,10 +663,10 @@ IAM define permisos. KMS controla llaves de cifrado.
 | Rol | Permiso mínimo |
 | --- | --- |
 | IoT Rule | `sqs:SendMessage` sólo a telemetría. |
-| telemetryProcessor | Consumir SQS, escritura condicional DynamoDB y `events:PutEvents` sólo al bus CareWatch. |
+| telemetryProcessor | Consumir SQS, escritura condicional DynamoDB y `events:PutEvents` sólo al bus SenseCare. |
 | deviceWatchdog | Leer `Devices`, adquirir `OpenCaseLocks`, crear caso y publicar evento. |
 | Step Functions | Invocar Lambdas del flujo, publicar SNS y llamar sólo a `EscalationPolicy`; sin permisos abiertos de S3/Connect. |
-| commandCallbackHandler / evidenceCallbackHandler | Leer correlación mínima y `states:SendTaskSuccess`/`states:SendTaskFailure` sólo para la máquina CareWatch. |
+| commandCallbackHandler / evidenceCallbackHandler | Leer correlación mínima y `states:SendTaskSuccess`/`states:SendTaskFailure` sólo para la máquina SenseCare. |
 | visionProcessor | Leer prefijo S3 del caso, invocar Bedrock y escribir observaciones. |
 | voiceCheckinHandler | Firmar audio, iniciar Transcribe y devolver resultado al `caseId`. |
 | apiHandler | Acceder sólo a tablas necesarias y firmar URLs S3. |
