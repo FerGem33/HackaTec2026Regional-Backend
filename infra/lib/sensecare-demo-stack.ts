@@ -15,21 +15,32 @@ import { EvidenceCallbacksTable } from "./constructs/evidence-callbacks-table";
 import { EvidenceCallbackQueues } from "./constructs/evidence-callback-queues";
 import { EvidenceCallbackRules } from "./constructs/evidence-callback-rules";
 import { EvidenceCallbackHandlers } from "./constructs/evidence-callback-handlers";
+import { ObservationsTable } from "./constructs/observations-table";
 import { CaseOrchestration } from "./constructs/case-orchestration";
 import { DeviceAccessPolicy } from "./constructs/device-access-policy";
 
+export interface SenseCareDemoStackProps extends cdk.StackProps {
+  // Requeridos, sin default: deben venir de una verificacion manual de
+  // solo lectura (aws bedrock list-foundation-models/list-inference-profiles)
+  // hecha por el operador antes de cada despliegue, nunca de un valor fijo
+  // en el codigo. Ver bin/sensecare-demo.ts.
+  bedrockModelId: string;
+  bedrockInferenceProfileArn: string;
+  bedrockFoundationModelArns: string[];
+}
+
 /**
  * Hito 2 (infraestructura base e ingesta) + Hito 4 completo (EventBridge ->
- * Step Functions Standard por caseId, seguido del transporte seguro de
- * evidencia puntual: consentimiento, UPLOAD_EVIDENCE con URL prefirmada,
- * callbacks MQTT y reconciliacion final). Sin Bedrock, SNS, Connect,
- * Cognito, API Gateway, frontend ni check-in de voz/audio todavia (ver
- * docs/IMPLEMENTATION_ROADMAP.md). No instancia Thing ni certificado X.509
- * (aprovisionamiento por dispositivo, fuera de CDK a proposito: ver
- * runbook de pre-despliegue).
+ * Step Functions Standard por caseId, transporte seguro de evidencia
+ * puntual, y analisis visual estructurado con Amazon Bedrock Converse tras
+ * evidenceStatus AVAILABLE). Sin SNS, Connect, Cognito, API Gateway,
+ * frontend, check-in de voz/audio, Bedrock Agents ni herramientas
+ * autonomas todavia (ver docs/IMPLEMENTATION_ROADMAP.md). No instancia
+ * Thing ni certificado X.509 (aprovisionamiento por dispositivo, fuera de
+ * CDK a proposito: ver runbook de pre-despliegue).
  */
 export class SenseCareDemoStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props: SenseCareDemoStackProps) {
     super(scope, id, props);
 
     const tables = new IngestionTables(this, "IngestionTables");
@@ -74,6 +85,8 @@ export class SenseCareDemoStack extends cdk.Stack {
       evidenceBucket: evidenceBucket.bucket,
     });
 
+    const observations = new ObservationsTable(this, "ObservationsTable");
+
     new CaseOrchestration(this, "CaseOrchestration", {
       eventBus,
       openCaseLocksTable: tables.openCaseLocksTable,
@@ -82,6 +95,10 @@ export class SenseCareDemoStack extends cdk.Stack {
       evidenceCallbacksTable: evidenceCallbacks.table,
       eventLogTable: tables.eventLogTable,
       evidenceBucket: evidenceBucket.bucket,
+      observationsTable: observations.table,
+      bedrockModelId: props.bedrockModelId,
+      bedrockInferenceProfileArn: props.bedrockInferenceProfileArn,
+      bedrockFoundationModelArns: props.bedrockFoundationModelArns,
     });
 
     // Politica IoT declarativa y versionada, sin Thing/certificado/llave

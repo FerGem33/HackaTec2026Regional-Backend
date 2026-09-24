@@ -6,6 +6,19 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { CaseOrchestration } from "../lib/constructs/case-orchestration.js";
 
+// Valores ficticios explicitos para pruebas, jamas los reales verificados
+// en la cuenta (ver bin/sensecare-demo.ts: el synth/deploy real exige
+// BEDROCK_MODEL_ID/BEDROCK_INFERENCE_PROFILE_ARN/BEDROCK_FOUNDATION_MODEL_ARNS
+// como variables de entorno, sin default).
+const TEST_BEDROCK_MODEL_ID = "us.amazon.nova-lite-v1:0";
+const TEST_BEDROCK_INFERENCE_PROFILE_ARN =
+  "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-lite-v1:0";
+const TEST_BEDROCK_FOUNDATION_MODEL_ARNS = [
+  "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0",
+  "arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-lite-v1:0",
+  "arn:aws:bedrock:us-east-2::foundation-model/amazon.nova-lite-v1:0",
+];
+
 interface AslState {
   Type: string;
   Next?: string;
@@ -60,6 +73,10 @@ function synth(): { template: Template; stack: Stack } {
     sortKey: { name: "occurredAtEventId", type: dynamodb.AttributeType.STRING },
   });
   const evidenceBucket = new s3.Bucket(stack, "EvidenceBucket");
+  const observationsTable = new dynamodb.Table(stack, "ObservationsTable", {
+    partitionKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "imageId", type: dynamodb.AttributeType.STRING },
+  });
   const eventBus = new events.EventBus(stack, "Bus", { eventBusName: "SenseCare" });
 
   new CaseOrchestration(stack, "CaseOrchestration", {
@@ -70,6 +87,12 @@ function synth(): { template: Template; stack: Stack } {
     evidenceCallbacksTable,
     eventLogTable,
     evidenceBucket,
+    observationsTable,
+    // Valores ficticios explicitos, nunca los reales verificados en la
+    // cuenta: ver TEST_BEDROCK_* al inicio del archivo.
+    bedrockModelId: TEST_BEDROCK_MODEL_ID,
+    bedrockInferenceProfileArn: TEST_BEDROCK_INFERENCE_PROFILE_ARN,
+    bedrockFoundationModelArns: TEST_BEDROCK_FOUNDATION_MODEL_ARNS,
   });
 
   return { template: Template.fromStack(stack), stack };
@@ -108,12 +131,13 @@ describe("CaseOrchestration", () => {
     }
   });
 
-  it("creates exactly the 5 task Lambdas invoked by the state machine", () => {
+  it("creates exactly the 7 task Lambdas invoked by the state machine", () => {
     const { template } = synth();
     const functions = template.findResources("AWS::Lambda::Function");
-    // 5 tasks (renew, upsert, cameraConsent, requestEvidenceUpload,
-    // recordEvidenceOutcome) + el dispatcher de EventBridge = 6.
-    expect(Object.keys(functions)).toHaveLength(6);
+    // 7 tasks (renew, upsert, cameraConsent, requestEvidenceUpload,
+    // recordEvidenceOutcome, analyzeEvidence, recordAnalysisOutcome) + el
+    // dispatcher de EventBridge = 8.
+    expect(Object.keys(functions)).toHaveLength(8);
   });
 
   it("wires the registration phase (RenewOpenCaseLock -> UpsertAnomalyCase) with Retry and a Catch to CaseRegistrationFailed", () => {
@@ -219,13 +243,12 @@ describe("CaseOrchestration", () => {
 
     const recordOutcome = definition.States.RecordEvidenceOutcome;
     expect(recordOutcome?.Type).toBe("Task");
-    expect(recordOutcome?.Next).toBe("CaseEvidencePhaseComplete");
+    expect(recordOutcome?.Next).toBe("EvidenceAvailable?");
     expect(recordOutcome?.Catch?.[0]).toMatchObject({
       ErrorEquals: ["States.ALL"],
       Next: "EvidenceOutcomeRecordingFailed",
     });
 
-    expect(definition.States.CaseEvidencePhaseComplete?.Type).toBe("Succeed");
     expect(definition.States.EvidenceOutcomeRecordingFailed?.Type).toBe("Fail");
   });
 
@@ -256,7 +279,7 @@ describe("CaseOrchestration", () => {
     });
   });
 
-  it("scopes the state machine's execution role to exactly the five task Lambda ARNs (no wildcard function resource)", () => {
+  it("scopes the state machine's execution role to exactly the seven task Lambda ARNs (no wildcard function resource)", () => {
     const { template } = synth();
     const roles = template.findResources("AWS::IAM::Role");
     const [stateMachineRoleId] = Object.entries(roles)
@@ -283,7 +306,7 @@ describe("CaseOrchestration", () => {
     // Cada Task otorga su propio grantInvoke (Arn + Arn:* para alias), sin
     // fusionarse en un unico statement; se cuentan los ARNs base distintos
     // (Fn::GetAtt directo, sin el sufijo ":*" de alias) para verificar que
-    // son exactamente las 5 Lambdas de tarea, ninguna de mas ni de menos.
+    // son exactamente las 7 Lambdas de tarea, ninguna de mas ni de menos.
     const baseArnKeys = new Set(
       invokeStatements.flatMap((s) => {
         const resources = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
@@ -296,7 +319,7 @@ describe("CaseOrchestration", () => {
       }),
     );
 
-    expect(baseArnKeys.size).toBe(5);
+    expect(baseArnKeys.size).toBe(7);
   });
 
   it("gives renewOpenCaseLockFn only dynamodb:UpdateItem on OpenCaseLocks", () => {
@@ -406,5 +429,175 @@ describe("CaseOrchestration", () => {
       { ManagedPolicyArns: Match.arrayWith([Match.stringLikeRegexp("AdministratorAccess")]) },
       0,
     );
+  });
+
+  it("branches on EvidenceAvailable?: AVAILABLE -> AnalyzeEvidence, otherwise -> CaseAnalysisPhaseComplete directly", () => {
+    const { template } = synth();
+    const definition = parseStateMachineDefinition(template);
+
+    expect(definition.States.RecordEvidenceOutcome?.Next).toBe("EvidenceAvailable?");
+
+    const choice = definition.States["EvidenceAvailable?"];
+    expect(choice?.Type).toBe("Choice");
+    expect(choice?.Choices?.[0]).toMatchObject({
+      Variable: "$.evidenceStatus",
+      Next: "AnalyzeEvidence",
+    });
+    expect(choice?.Default).toBe("CaseAnalysisPhaseComplete");
+  });
+
+  it("wires AnalyzeEvidence with Retry only for Bedrock-transient errors and 4 distinct Catch branches with fixed failureReason literals", () => {
+    const { template } = synth();
+    const definition = parseStateMachineDefinition(template);
+
+    const analyze = definition.States.AnalyzeEvidence;
+    expect(analyze?.Type).toBe("Task");
+    expect(analyze?.Next).toBe("PrepareAnalysisOutcome");
+
+    const bedrockRetry = analyze?.Retry?.find((r) => r.ErrorEquals.includes("ThrottlingException"));
+    expect(bedrockRetry?.ErrorEquals).toEqual(
+      expect.arrayContaining([
+        "ThrottlingException",
+        "ModelTimeoutException",
+        "ServiceUnavailableException",
+        "InternalServerException",
+        "ModelErrorException",
+      ]),
+    );
+    // Nunca se reintentan validation/access-denied: se atrapan dentro del
+    // Lambda y jamas llegan como excepcion (ver
+    // services/analysis/src/analyzeEvidenceFn.ts).
+    expect(bedrockRetry?.ErrorEquals).not.toContain("ValidationException");
+    expect(bedrockRetry?.ErrorEquals).not.toContain("AccessDeniedException");
+
+    expect(analyze?.Catch?.[0]).toMatchObject({
+      ErrorEquals: ["ThrottlingException"],
+      Next: "MapToAnalysisUncertainThrottled",
+    });
+    expect(analyze?.Catch?.[1]).toMatchObject({
+      ErrorEquals: ["ModelTimeoutException"],
+      Next: "MapToAnalysisUncertainTimeout",
+    });
+    expect(analyze?.Catch?.[2]).toMatchObject({
+      ErrorEquals: ["ServiceUnavailableException", "InternalServerException", "ModelErrorException"],
+      Next: "MapToAnalysisUncertainUnavailable",
+    });
+    expect(analyze?.Catch?.[3]).toMatchObject({
+      ErrorEquals: ["States.ALL"],
+      Next: "MapToAnalysisUncertainInternal",
+    });
+
+    for (const [stateName, expectedReason] of [
+      ["MapToAnalysisUncertainThrottled", "THROTTLED"],
+      ["MapToAnalysisUncertainTimeout", "MODEL_TIMEOUT"],
+      ["MapToAnalysisUncertainUnavailable", "MODEL_UNAVAILABLE"],
+      ["MapToAnalysisUncertainInternal", "INTERNAL_ERROR"],
+    ] as const) {
+      const state = definition.States[stateName];
+      expect(state?.Type).toBe("Pass");
+      expect(state?.Parameters?.analysisStatus).toBe("UNCERTAIN");
+      expect(state?.Parameters?.failureReason).toBe(expectedReason);
+      // sfn.Pass omite las claves con valor literal null al sintetizar, asi
+      // que "observation" simplemente no existe aqui (ver comentario en
+      // case-orchestration.ts); recordAnalysisOutcomeFn.ts nunca la lee
+      // fuera de la rama COMPLETED, asi que su ausencia es inocua.
+      expect(state?.Parameters?.observation).toBeUndefined();
+      // Nunca $.analysisError.Error: el failureReason es siempre un
+      // literal fijo, jamas texto de excepcion tecnica sin controlar.
+      expect(state?.Parameters?.["failureReason.$"]).toBeUndefined();
+      expect(state?.Next).toBe("RecordAnalysisOutcome");
+    }
+  });
+
+  it("converges every analysis outcome into RecordAnalysisOutcome -> CaseAnalysisPhaseComplete, with a Fail state as the last resort", () => {
+    const { template } = synth();
+    const definition = parseStateMachineDefinition(template);
+
+    expect(definition.States.PrepareAnalysisOutcome?.Type).toBe("Pass");
+    expect(definition.States.PrepareAnalysisOutcome?.Next).toBe("RecordAnalysisOutcome");
+
+    const recordAnalysis = definition.States.RecordAnalysisOutcome;
+    expect(recordAnalysis?.Type).toBe("Task");
+    expect(recordAnalysis?.Next).toBe("CaseAnalysisPhaseComplete");
+    expect(recordAnalysis?.Catch?.[0]).toMatchObject({
+      ErrorEquals: ["States.ALL"],
+      Next: "AnalysisOutcomeRecordingFailed",
+    });
+
+    expect(definition.States.CaseAnalysisPhaseComplete?.Type).toBe("Succeed");
+    expect(definition.States.AnalysisOutcomeRecordingFailed?.Type).toBe("Fail");
+  });
+
+  it("gives analyzeEvidenceFn only s3:GetObject on raw-images/*, bedrock:InvokeModel scoped to the profile + foundation models with the InferenceProfileArn condition, and PutItem on EventLog only", () => {
+    const { template } = synth();
+    const statements = policyStatements(template);
+
+    const s3GetStatement = statements.find((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.length === 1 && actions[0] === "s3:GetObject";
+    });
+    expect(s3GetStatement).toBeDefined();
+    expect(JSON.stringify(s3GetStatement?.Resource)).toContain("raw-images/*");
+
+    const bedrockStatements = statements.filter((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.length === 1 && actions[0] === "bedrock:InvokeModel";
+    }) as Array<{ Resource: unknown; Condition?: unknown }>;
+    expect(bedrockStatements).toHaveLength(2);
+
+    const profileStatement = bedrockStatements.find((s) => !s.Condition);
+    expect(profileStatement?.Resource).toBe(TEST_BEDROCK_INFERENCE_PROFILE_ARN);
+
+    const modelStatement = bedrockStatements.find((s) => s.Condition);
+    expect(modelStatement?.Resource).toEqual(TEST_BEDROCK_FOUNDATION_MODEL_ARNS);
+    expect(modelStatement?.Condition).toEqual({
+      StringEquals: { "bedrock:InferenceProfileArn": TEST_BEDROCK_INFERENCE_PROFILE_ARN },
+    });
+
+    // dynamodb:PutItem en EventLog unicamente: nada en AnomalyCases ni
+    // Observations desde este Lambda.
+    const putItemStatements = statements.filter((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.length === 1 && actions[0] === "dynamodb:PutItem";
+    });
+    expect(putItemStatements.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("gives recordAnalysisOutcomeFn dynamodb:UpdateItem on AnomalyCases, PutItem on Observations and EventLog, and nothing on S3/Bedrock", () => {
+    const { template } = synth();
+    const policies = template.findResources("AWS::IAM::Policy");
+
+    // Identifica la policy propia de recordAnalysisOutcomeFn por su marca
+    // distintiva (un PutItem cuyo Resource referencia ObservationsTable,
+    // que ningun otro Lambda de este construct toca), en vez de barrer
+    // TODAS las policies del template (analyzeEvidenceFn si tiene
+    // bedrock:InvokeModel legitimamente en otra policy).
+    const recordAnalysisPolicy = Object.values(policies).find((p) => {
+      const statements = (
+        p as { Properties: { PolicyDocument: { Statement: Array<{ Resource: unknown }> } } }
+      ).Properties.PolicyDocument.Statement;
+      return statements.some((s) => JSON.stringify(s.Resource).includes("ObservationsTable"));
+    }) as { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } } };
+    expect(recordAnalysisPolicy).toBeDefined();
+
+    const ownStatements = recordAnalysisPolicy.Properties.PolicyDocument.Statement;
+    expect(ownStatements.some((s) => JSON.stringify(s.Action).includes("bedrock:"))).toBe(false);
+    expect(ownStatements.some((s) => JSON.stringify(s.Action).includes("s3:"))).toBe(false);
+    expect(
+      ownStatements.some((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes("dynamodb:PutItem") && JSON.stringify(s.Resource).includes("ObservationsTable");
+      }),
+    ).toBe(true);
+
+    const statements = policyStatements(template);
+    const updateOnlyStatements = statements.filter((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.length === 1 && actions[0] === "dynamodb:UpdateItem";
+    });
+    // renewOpenCaseLockFn (OpenCaseLocks) + recordEvidenceOutcomeFn
+    // (AnomalyCases + EvidenceCallbacks) + recordAnalysisOutcomeFn
+    // (AnomalyCases).
+    expect(updateOnlyStatements.length).toBeGreaterThanOrEqual(4);
   });
 });
